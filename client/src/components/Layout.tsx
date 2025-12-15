@@ -1,6 +1,7 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useWalletStore } from '../store/wallet';
+import WalletConnectButton from './IrisConnectButton';
 
 interface LayoutProps {
   children: ReactNode;
@@ -23,17 +24,13 @@ export default function Layout({ children }: LayoutProps) {
           Agora
         </Link>
         <nav style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          {pkh ? (
+          {pkh && (
             <>
               <Link to="/wallets" style={{ textDecoration: 'none', color: '#333' }}>Wallets</Link>
               <Link to="/transactions" style={{ textDecoration: 'none', color: '#333' }}>Transactions</Link>
-              <span style={{ fontSize: '0.875rem', color: '#666' }}>
-                {`${pkh.substring(0, 8)}...${pkh.substring(pkh.length - 8)}`}
-              </span>
             </>
-          ) : (
-            <Link to="/" style={{ textDecoration: 'none', color: '#666' }}>Connect Wallet</Link>
           )}
+          <WalletConnectButton />
         </nav>
       </header>
       <main style={{ flex: 1, padding: '2rem', maxWidth: '1200px', margin: '0 auto', width: '100%' }}>

@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import IrisConnect from './components/IrisConnect';
+import Home from './components/Home';
 import WalletList from './components/WalletList';
 import WalletCreate from './components/WalletCreate';
 import Layout from './components/Layout';
@@ -9,7 +9,7 @@ function App() {
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/" element={<IrisConnect />} />
+          <Route path="/" element={<Home />} />
           <Route path="/wallets" element={<WalletList />} />
           <Route path="/wallets/create" element={<WalletCreate />} />
         </Routes>
