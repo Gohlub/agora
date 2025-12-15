@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
 import { wasm } from '@nockbox/iris-sdk';
+import { useWasmCleanup } from '../utils/wasm-cleanup';
 
 export default function WalletCreate() {
   const [threshold, setThreshold] = useState(2);
@@ -13,6 +14,7 @@ export default function WalletCreate() {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+  const wasmCleanup = useWasmCleanup();
 
   // Update first signer when wallet connects/disconnects
   useEffect(() => {
@@ -77,8 +79,6 @@ export default function WalletCreate() {
     setLoading(true);
     setError(null);
 
-    const wasmObjects: Array<{ free: () => void } | null> = [];
-
     try {
       const validPkhs = signerPkhs.filter(pkh => pkh.trim() !== '');
       if (validPkhs.length === 0) {
@@ -95,17 +95,10 @@ export default function WalletCreate() {
       await wasm.default();
       
       console.log(validPkhs)
-      const multisigPkh = new wasm.Pkh(BigInt(threshold), validPkhs);
-      wasmObjects.push(multisigPkh);
-      
-      const lockPrimitive = wasm.LockPrimitive.newPkh(multisigPkh);
-      wasmObjects.push(lockPrimitive);
-      
-      const spendCondition = new wasm.SpendCondition([lockPrimitive]);
-      wasmObjects.push(spendCondition);
-      
-      const firstName = spendCondition.firstName();
-      wasmObjects.push(firstName);
+      const multisigPkh = new wasm.Pkh(BigInt(threshold), validPkhs); // don't register because parent will be freed anyways
+      const lockPrimitive = wasm.LockPrimitive.newPkh(multisigPkh); // same here
+      const spendCondition = wasmCleanup.register(new wasm.SpendCondition([lockPrimitive]));
+      const firstName = wasmCleanup.register(spendCondition.firstName());
       const lockRootHash = firstName.value;
       
       // create multisig spending condition
@@ -117,12 +110,10 @@ export default function WalletCreate() {
         pkh
       );
       
+      setLoading(false);
       navigate('/wallets');
     } catch (err: any) {
       setError(err.message || 'Failed to create wallet');
-    } finally {
-      // Always clean up WASM objects, even on error
-      wasmObjects.forEach(obj => obj?.free());
       setLoading(false);
     }
   };
