@@ -8,6 +8,7 @@ export default function WalletConnectButton() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isHovered, setIsHovered] = useState(false);
+  const [isDisconnectHovered, setIsDisconnectHovered] = useState(false);
 
   // Verify stored wallet connection is still valid on mount
   useEffect(() => {
@@ -52,20 +53,28 @@ export default function WalletConnectButton() {
         </span>
         <button
           onClick={handleDisconnect}
+          onMouseEnter={() => setIsDisconnectHovered(true)}
+          onMouseLeave={() => setIsDisconnectHovered(false)}
           style={{
-            padding: '0.5rem 1rem',
-            fontSize: '0.875rem',
-            backgroundColor: '#dc3545',
-            color: 'white',
+            padding: '16px 20px 16px 16px',
+            fontFamily: 'Inter',
+            fontWeight: 500,
+            fontSize: '17px',
+            lineHeight: '24px',
+            letterSpacing: '-0.02em',
+            color: '#333333',
+            backgroundColor: isDisconnectHovered ? '#E8E7E3' : '#F6F5F1',
             border: 'none',
-            borderRadius: '4px',
+            borderRadius: '28px',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            gap: '0.5rem',
+            gap: '12px',
+            boxSizing: 'border-box',
+            margin: 0,
+            transition: 'background-color 0.2s ease',
           }}
         >
-          <img src={walletIcon} alt="Wallet" style={{ width: '16px', height: '16px' }} />
           Disconnect
         </button>
       </div>
