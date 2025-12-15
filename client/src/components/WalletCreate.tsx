@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
@@ -6,11 +6,27 @@ import { wasm } from '@nockbox/iris-sdk';
 
 export default function WalletCreate() {
   const [threshold, setThreshold] = useState(2);
-  const [signerPkhs, setSignerPkhs] = useState<string[]>(['']);
+  const { pkh } = useWalletStore();
+  const [signerPkhs, setSignerPkhs] = useState<string[]>(pkh ? [pkh] : ['']);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
-  const { pkh } = useWalletStore();
+
+  // Update first signer when wallet connects/disconnects
+  useEffect(() => {
+    if (pkh) {
+      setSignerPkhs(prev => {
+        // If first signer is empty or different, update it
+        if (prev[0] === '' || prev[0] !== pkh) {
+          return [pkh, ...prev.slice(1)];
+        }
+        return prev;
+      });
+    } else {
+      // If wallet disconnects, clear first signer
+      setSignerPkhs(prev => ['', ...prev.slice(1)]);
+    }
+  }, [pkh]);
 
   const addSigner = () => {
     setSignerPkhs([...signerPkhs, '']);
@@ -23,6 +39,10 @@ export default function WalletCreate() {
   };
 
   const removeSigner = (index: number) => {
+    // Don't allow removing the first signer if it's the connected wallet
+    if (index === 0 && pkh && signerPkhs[0] === pkh) {
+      return;
+    }
     setSignerPkhs(signerPkhs.filter((_, i) => i !== index));
   };
 
@@ -117,21 +137,24 @@ export default function WalletCreate() {
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
             Signer PKHs
           </label>
-          {signerPkhs.map((pkh, index) => (
+          {signerPkhs.map((signerPkh, index) => (
             <div key={index} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
               <input
                 type="text"
-                value={pkh}
+                value={signerPkh}
                 onChange={(e) => updateSigner(index, e.target.value)}
                 placeholder="Enter PKH address"
+                disabled={index === 0 && !!pkh && signerPkhs[0] === pkh}
                 style={{
                   flex: 1,
                   padding: '0.75rem',
                   border: '1px solid #ddd',
                   borderRadius: '4px',
+                  backgroundColor: index === 0 && !!pkh && signerPkhs[0] === pkh ? '#f5f5f5' : 'white',
+                  cursor: index === 0 && !!pkh && signerPkhs[0] === pkh ? 'not-allowed' : 'text',
                 }}
               />
-              {signerPkhs.length > 1 && (
+              {signerPkhs.length > 1 && !(index === 0 && pkh && signerPkhs[0] === pkh) && (
                 <button
                   type="button"
                   onClick={() => removeSigner(index)}
