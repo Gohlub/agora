@@ -77,6 +77,8 @@ export default function WalletCreate() {
     setLoading(true);
     setError(null);
 
+    const wasmObjects: Array<{ free: () => void } | null> = [];
+
     try {
       const validPkhs = signerPkhs.filter(pkh => pkh.trim() !== '');
       if (validPkhs.length === 0) {
@@ -92,12 +94,18 @@ export default function WalletCreate() {
       
       await wasm.default();
       
-
+      console.log(validPkhs)
       const multisigPkh = new wasm.Pkh(BigInt(threshold), validPkhs);
+      wasmObjects.push(multisigPkh);
+      
       const lockPrimitive = wasm.LockPrimitive.newPkh(multisigPkh);
+      wasmObjects.push(lockPrimitive);
+      
       const spendCondition = new wasm.SpendCondition([lockPrimitive]);
+      wasmObjects.push(spendCondition);
       
       const firstName = spendCondition.firstName();
+      wasmObjects.push(firstName);
       const lockRootHash = firstName.value;
       
       // create multisig spending condition
@@ -109,16 +117,12 @@ export default function WalletCreate() {
         pkh
       );
       
-      // Clean 
-      firstName.free();
-      spendCondition.free();
-      lockPrimitive.free();
-      multisigPkh.free();
-      
       navigate('/wallets');
     } catch (err: any) {
       setError(err.message || 'Failed to create wallet');
     } finally {
+      // Always clean up WASM objects, even on error
+      wasmObjects.forEach(obj => obj?.free());
       setLoading(false);
     }
   };
