@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
@@ -10,6 +10,8 @@ export default function WalletCreate() {
   const [signerPkhs, setSignerPkhs] = useState<string[]>(pkh ? [pkh] : ['']);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
   // Update first signer when wallet connects/disconnects
@@ -27,6 +29,30 @@ export default function WalletCreate() {
       setSignerPkhs(prev => ['', ...prev.slice(1)]);
     }
   }, [pkh]);
+
+  // Adjust threshold if it exceeds number of signers
+  useEffect(() => {
+    if (threshold > signerPkhs.length) {
+      setThreshold(signerPkhs.length);
+    }
+  }, [signerPkhs.length, threshold]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+
+    if (dropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [dropdownOpen]);
 
   const addSigner = () => {
     setSignerPkhs([...signerPkhs, '']);
@@ -99,7 +125,7 @@ export default function WalletCreate() {
 
   return (
     <div style={{ maxWidth: '600px', margin: '0 auto' }}>
-      <h1 style={{ marginBottom: '2rem' }}>Create Multisig Wallet</h1>
+      <h1 style={{ marginBottom: '2rem' }}>Create a multisig wallet</h1>
       {error && (
         <div style={{
           padding: '1rem',
@@ -116,22 +142,92 @@ export default function WalletCreate() {
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
             Threshold (m of n)
           </label>
-          <input
-            type="number"
-            min="1"
-            max={signerPkhs.length}
-            value={threshold}
-            onChange={(e) => setThreshold(parseInt(e.target.value) || 1)}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-            }}
-          />
-          <p style={{ marginTop: '0.5rem', fontSize: '0.875rem', color: '#666' }}>
-            {threshold} of {signerPkhs.length} signatures required
-          </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <div ref={dropdownRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <button
+                type="button"
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                style={{
+                  padding: '0.75rem 2.5rem 0.75rem 0.75rem',
+                  border: '1px solid #ddd',
+                  borderRadius: '4px',
+                  fontSize: '1rem',
+                  cursor: 'pointer',
+                  backgroundColor: 'white',
+                  color: '#333',
+                  minWidth: '50px',
+                  textAlign: 'left',
+                  transition: 'border-color 0.2s ease',
+                  borderColor: dropdownOpen ? '#007bff' : '#ddd',
+                }}
+              >
+                {threshold}
+                <span style={{
+                  position: 'absolute',
+                  right: '0.75rem',
+                  top: '50%',
+                  transform: dropdownOpen ? 'translateY(-50%) rotate(180deg)' : 'translateY(-50%)',
+                  transition: 'transform 0.2s ease',
+                }}>
+                  ▼
+                </span>
+              </button>
+              {dropdownOpen && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  marginTop: '0.25rem',
+                  backgroundColor: 'white',
+                  border: '1px solid #ddd',
+                  borderRadius: '4px',
+                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+                  zIndex: 1000,
+                  maxHeight: '200px',
+                  overflowY: 'auto',
+                }}>
+                  {Array.from({ length: signerPkhs.length }, (_, i) => i + 1).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => {
+                        setThreshold(value);
+                        setDropdownOpen(false);
+                      }}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        padding: '0.75rem',
+                        textAlign: 'left',
+                        border: 'none',
+                        backgroundColor: value === threshold ? '#f0f0f0' : 'white',
+                        color: '#333',
+                        cursor: 'pointer',
+                        fontSize: '1rem',
+                        transition: 'background-color 0.15s ease',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (value !== threshold) {
+                          e.currentTarget.style.backgroundColor = '#f8f8f8';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (value !== threshold) {
+                          e.currentTarget.style.backgroundColor = 'white';
+                        }
+                      }}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <p style={{ margin: 0, fontSize: '0.875rem', color: '#666' }}>
+              of {signerPkhs.length} signatures required
+            </p>
+          </div>
         </div>
         <div style={{ marginBottom: '1.5rem' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
