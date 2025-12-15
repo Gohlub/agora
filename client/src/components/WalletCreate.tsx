@@ -140,97 +140,6 @@ export default function WalletCreate() {
       <form onSubmit={handleSubmit}>
         <div style={{ marginBottom: '1.5rem' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
-            Threshold (m of n)
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div ref={dropdownRef} style={{ position: 'relative', display: 'inline-block' }}>
-              <button
-                type="button"
-                onClick={() => setDropdownOpen(!dropdownOpen)}
-                style={{
-                  padding: '0.75rem 2.5rem 0.75rem 0.75rem',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  fontSize: '1rem',
-                  cursor: 'pointer',
-                  backgroundColor: 'white',
-                  color: '#333',
-                  minWidth: '50px',
-                  textAlign: 'left',
-                  transition: 'border-color 0.2s ease',
-                  borderColor: dropdownOpen ? '#007bff' : '#ddd',
-                }}
-              >
-                {threshold}
-                <span style={{
-                  position: 'absolute',
-                  right: '0.75rem',
-                  top: '50%',
-                  transform: dropdownOpen ? 'translateY(-50%) rotate(180deg)' : 'translateY(-50%)',
-                  transition: 'transform 0.2s ease',
-                }}>
-                  ▼
-                </span>
-              </button>
-              {dropdownOpen && (
-                <div style={{
-                  position: 'absolute',
-                  top: '100%',
-                  left: 0,
-                  right: 0,
-                  marginTop: '0.25rem',
-                  backgroundColor: 'white',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-                  zIndex: 1000,
-                  maxHeight: '200px',
-                  overflowY: 'auto',
-                }}>
-                  {Array.from({ length: signerPkhs.length }, (_, i) => i + 1).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => {
-                        setThreshold(value);
-                        setDropdownOpen(false);
-                      }}
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        padding: '0.75rem',
-                        textAlign: 'left',
-                        border: 'none',
-                        backgroundColor: value === threshold ? '#f0f0f0' : 'white',
-                        color: '#333',
-                        cursor: 'pointer',
-                        fontSize: '1rem',
-                        transition: 'background-color 0.15s ease',
-                      }}
-                      onMouseEnter={(e) => {
-                        if (value !== threshold) {
-                          e.currentTarget.style.backgroundColor = '#f8f8f8';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (value !== threshold) {
-                          e.currentTarget.style.backgroundColor = 'white';
-                        }
-                      }}
-                    >
-                      {value}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <p style={{ margin: 0, fontSize: '0.875rem', color: '#666' }}>
-              of {signerPkhs.length} signatures required
-            </p>
-          </div>
-        </div>
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
             Signer PKHs
           </label>
           {signerPkhs.map((signerPkh, index) => (
@@ -284,35 +193,133 @@ export default function WalletCreate() {
             Add Signer
           </button>
         </div>
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: loading ? '#ccc' : '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {loading ? 'Creating...' : 'Create Wallet'}
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate('/wallets')}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#6c757d',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-            }}
-          >
-            Cancel
-          </button>
+        <hr style={{
+          border: 'none',
+          borderTop: '1px solid #e0e0e0',
+          margin: '2rem 0',
+        }} />
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+            Threshold (m of n)
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <div ref={dropdownRef} style={{ position: 'relative', display: 'inline-block' }}>
+                <button
+                  type="button"
+                  onClick={() => setDropdownOpen(!dropdownOpen)}
+                  style={{
+                    padding: '0.75rem 2.5rem 0.75rem 0.75rem',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    fontSize: '1rem',
+                    cursor: 'pointer',
+                    backgroundColor: 'white',
+                    color: '#333',
+                    minWidth: '50px',
+                    textAlign: 'left',
+                    transition: 'border-color 0.2s ease',
+                    borderColor: dropdownOpen ? '#007bff' : '#ddd',
+                  }}
+                >
+                  {threshold}
+                  <span style={{
+                    position: 'absolute',
+                    right: '0.75rem',
+                    top: '50%',
+                    transform: dropdownOpen ? 'translateY(-50%) rotate(180deg)' : 'translateY(-50%)',
+                    transition: 'transform 0.2s ease',
+                  }}>
+                    ▼
+                  </span>
+                </button>
+                {dropdownOpen && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '100%',
+                    left: 0,
+                    right: 0,
+                    marginTop: '0.25rem',
+                    backgroundColor: 'white',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+                    zIndex: 1000,
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                  }}>
+                    {Array.from({ length: signerPkhs.length }, (_, i) => i + 1).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => {
+                          setThreshold(value);
+                          setDropdownOpen(false);
+                        }}
+                        style={{
+                          display: 'block',
+                          width: '100%',
+                          padding: '0.75rem',
+                          textAlign: 'left',
+                          border: 'none',
+                          backgroundColor: value === threshold ? '#f0f0f0' : 'white',
+                          color: '#333',
+                          cursor: 'pointer',
+                          fontSize: '1rem',
+                          transition: 'background-color 0.15s ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          if (value !== threshold) {
+                            e.currentTarget.style.backgroundColor = '#f8f8f8';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (value !== threshold) {
+                            e.currentTarget.style.backgroundColor = 'white';
+                          }
+                        }}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <p style={{ margin: 0, fontSize: '0.875rem', color: '#666' }}>
+                of {signerPkhs.length} signatures required
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: '1rem' }}>
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: loading ? '#ccc' : '#007bff',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {loading ? 'Creating...' : 'Create Wallet'}
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/wallets')}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       </form>
     </div>
