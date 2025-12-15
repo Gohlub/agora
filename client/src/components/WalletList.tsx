@@ -2,8 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
-import { NockchainProvider } from '@nockbox/iris-sdk';
-import * as wasm from '@nockbox/iris-wasm/iris_wasm.js';
+import { NockchainProvider, wasm } from '@nockbox/iris-sdk';
 import { 
   checkTransactionAcceptance, 
   pollForTransactionInclusionWithCleanup,

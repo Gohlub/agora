@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
-import * as wasm from '@nockbox/iris-wasm/iris_wasm.js';
+import { wasm } from '@nockbox/iris-sdk';
 
 export default function WalletCreate() {
   const [threshold, setThreshold] = useState(2);
