@@ -11,6 +11,7 @@ import {
   INCLUSION_POLL_INTERVAL_MS,
   INCLUSION_POLL_MAX_DURATION_MS
 } from '../utils/tx-lifecycle';
+import { useWasmCleanup, getGrpcClient } from '../utils/wasm-cleanup';
 
 interface WalletWithStatus {
   id: string;
@@ -22,7 +23,21 @@ interface WalletWithStatus {
   participants?: string[]; 
   isFunded?: boolean;
   balance?: number;
-  isPolling?: boolean; 
+  isPolling?: boolean;
+  /**
+   * Store protoNotes for transaction building (only when funded)
+   * 
+   * To propose a transaction from this multisig wallet:
+   * 1. Get notes: wallet.notes (contains protoNote and assets)
+   * 2. Create WASM Note objects: notes.map(n => wasm.Note.fromProtobuf(n.protoNote))
+   * 3. Reconstruct multisig SpendCondition from participants/threshold
+   * 4. Build transaction using the WASM Note objects and SpendCondition
+   * 
+   * protoNote is the raw protobuf object from gRPC (getBalanceByFirstName response).
+   * It has structure: { note_version?: { V1?: { assets?: { value?: number }, ... } }, ... }
+   * Type is `unknown` for type safety, but will be passed to wasm.Note.fromProtobuf() which accepts any.
+   */
+  notes?: Array<{ protoNote: any; assets: number }>;
 }
 
 export default function WalletList() {
@@ -34,14 +49,18 @@ export default function WalletList() {
   const [error, setError] = useState<string | null>(null);
   const { pkh, grpcEndpoint } = useWalletStore();
   const pollingCleanups = useRef<Map<string, () => void>>(new Map());
+  const wasmCleanup = useWasmCleanup();
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
+    
     if (pkh && grpcEndpoint) {
       loadWallets();
     }
     
-    // stop polling 
     return () => {
+      isMountedRef.current = false;
       pollingCleanups.current.forEach(cleanup => cleanup());
       pollingCleanups.current.clear();
     };
@@ -49,58 +68,65 @@ export default function WalletList() {
 
   const loadWallets = async () => {
     if (!pkh || !grpcEndpoint) return;
+    
     try {
       setLoading(true);
       const data = await apiClient.listMultisigs(pkh);
       
-      // Check funding status for locks
-      await wasm.default();
-      const grpcClient = new wasm.GrpcClient(grpcEndpoint);
+      // Singleton GrpcClient - same instance reused across mounts, preventing WASM closure errors
+      const grpcClient = await getGrpcClient(grpcEndpoint);
       
-      const walletsWithStatus: WalletWithStatus[] = await Promise.all(
-        data.map(async (wallet: any) => {
-          try {
-            const lockRootHash = wallet.lock_root_hash;
-            
-            if (!lockRootHash) {
-              throw new Error('Wallet missing lock_root_hash');
-            }
-            
-            // check if notes exist for this spending condition 
-            const balance = await grpcClient.getBalanceByFirstName(lockRootHash);
-            const isFunded = balance?.notes && balance.notes.length > 0;
-            let totalBalance = 0;
-            if (balance?.notes) {
-              for (const n of balance.notes) {
-                const note = wasm.Note.fromProtobuf(n.note);
-                totalBalance += Number(note.assets);
-                note.free();
-              }
-            }
-            
-            return {
-              ...wallet,
-              lock_root_hash: lockRootHash,
-              isFunded,
-              balance: totalBalance,
-            };
-          } catch (e) {
-            console.error(`Failed to process wallet ${wallet.id}:`, e);
-            return {
-              ...wallet,
-              lock_root_hash: wallet.lock_root_hash || '',
-              isFunded: false,
-              balance: 0,
-            };
+      const walletsWithStatus: WalletWithStatus[] = [];
+      
+      for (const wallet of data) {
+        try {
+          const lockRootHash = wallet.lock_root_hash;
+          
+          if (!lockRootHash || typeof lockRootHash !== 'string' || lockRootHash.length === 0) {
+            console.error(`Wallet ${wallet.id} has invalid lock_root_hash`);
+            continue;
           }
-        })
-      );
+          
+          const balance = await grpcClient.getBalanceByFirstName(lockRootHash);
+          
+          const isFunded = balance?.notes && balance.notes.length > 0;
+          let totalBalance = 0;
+          const notes: Array<{ protoNote: any; assets: number }> = [];
+          
+          if (balance?.notes) {
+            for (const n of balance.notes) {
+              const assets = n.assets || 
+                n.note?.note_version?.V1?.assets?.value || 
+                n.note?.v1?.assets?.value || 
+                0;
+              totalBalance += Number(assets);
+              notes.push({ protoNote: n.note, assets: Number(assets) });
+            }
+          }
+          
+          walletsWithStatus.push({
+            ...wallet,
+            lock_root_hash: lockRootHash,
+            isFunded,
+            balance: totalBalance,
+            notes: notes.length > 0 ? notes : undefined,
+          });
+        } catch (e: any) {
+          console.error(`Failed to process wallet ${wallet.id}:`, e);
+        }
+      }
       
-      setWallets(walletsWithStatus);
+      if (isMountedRef.current) {
+        setWallets(walletsWithStatus);
+      }
     } catch (err: any) {
-      setError(err.message || 'Failed to load wallets');
+      if (isMountedRef.current) {
+        setError(err.message || 'Failed to load wallets');
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -114,24 +140,23 @@ export default function WalletList() {
       setFunding(new Set([...funding, wallet.id]));
       setError(null);
 
-      await wasm.default();
       const provider = new NockchainProvider();
-      const grpcClient = new wasm.GrpcClient(grpcEndpoint);
+      const grpcClient = await getGrpcClient(grpcEndpoint);
 
-      // collect info to fund the multisig wallet
-      const userPkh = wasm.Pkh.single(pkh);
-      const userSpendCondition = wasm.SpendCondition.newPkh(userPkh);
-      const userFirstName = userSpendCondition.firstName();
-      const userBalance = await grpcClient.getBalanceByFirstName(userFirstName.value);
-      userSpendCondition.free();
-      userPkh.free();
+      const userPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
+      const userSpendCondition = wasmCleanup.register(wasm.SpendCondition.newPkh(userPkh));
+      const userFirstName = wasmCleanup.register(userSpendCondition.firstName());
+      const userFirstNameValue = userFirstName.value;
+      const userBalance = await grpcClient.getBalanceByFirstName(userFirstNameValue);
 
       if (!userBalance || !userBalance.notes || userBalance.notes.length === 0) {
         throw new Error('No notes available to fund the multisig note');
       }
 
-      // convert notes from protobuf
-      const notes = userBalance.notes.map((n: any) => wasm.Note.fromProtobuf(n.note));
+      // Convert notes from protobuf - these are needed for transaction building
+      const notes = userBalance.notes.map((n: any) => 
+        wasmCleanup.register(wasm.Note.fromProtobuf(n.note))
+      );
       const note = notes[0];
       const noteAssets = note.assets;
 
@@ -144,36 +169,34 @@ export default function WalletList() {
         throw new Error(`Insufficient funds: need ${FUND_AMOUNT_NICKS} nicks, have ${noteAssets}`);
       }
 
-      // vuild transaction to create a note bound to the multisig spending condition
-      const builder = new wasm.TxBuilder(feePerWord);
+      // Build transaction to create a note bound to the multisig spending condition
+      const builder = wasmCleanup.register(new wasm.TxBuilder(feePerWord));
 
       // create lock root hash as recipient (to initialize the multisig note)
-      const lockRootDigest = new wasm.Digest(wallet.lock_root_hash);
-      const lockRoot = wasm.LockRoot.fromHash(lockRootDigest);
+      const lockRootDigest = wasmCleanup.register(new wasm.Digest(wallet.lock_root_hash));
+      const lockRoot = wasmCleanup.register(wasm.LockRoot.fromHash(lockRootDigest));
 
-      // recreate user's spend condition for the input note
-      const inputPkh = wasm.Pkh.single(pkh);
-      const inputSpendCondition = wasm.SpendCondition.newPkh(inputPkh);
+      const inputPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
+      const inputSpendCondition = wasmCleanup.register(wasm.SpendCondition.newPkh(inputPkh));
       
-      // create refund lock (user's PKH)
-      const refundPkh = wasm.Pkh.single(pkh);
-      const refundLock = wasm.SpendCondition.newPkh(refundPkh);
+      const refundPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
+      const refundLock = wasmCleanup.register(wasm.SpendCondition.newPkh(refundPkh));
 
       // create SpendBuilder for the input note
-      const spendBuilder = new wasm.SpendBuilder(
+      const spendBuilder = wasmCleanup.register(new wasm.SpendBuilder(
         notes[0],
         inputSpendCondition,
         refundLock
-      );
+      ));
 
       // create seed that sends to lock-root hash (multisig spending condition)
-      const seed = new wasm.Seed(
+      const seed = wasmCleanup.register(new wasm.Seed(
         null, // output_source
         lockRoot, // lock_root (hash)
         FUND_AMOUNT_NICKS, // gift
         wasm.NoteData.empty(), // note_data
         notes[0].hash() // parent_hash
-      );
+      ));
 
       // add seed to spend builder
       spendBuilder.seed(seed);
@@ -187,43 +210,27 @@ export default function WalletList() {
       // recalculate and set fees
       builder.recalcAndSetFee(false);
 
-      // build the transaction
       const nockchainTx = builder.build();
-      const txId = nockchainTx.id.value; // Get transaction ID before signing
+      const txId = nockchainTx.id.value;
       const rawTxProtobuf = nockchainTx.toRawTx().toProtobuf();
       const txNotes = builder.allNotes();
+      const txNotesArray = txNotes.notes;
+      const txSpendConditionsArray = txNotes.spendConditions;
 
-      // sign using iris provider
       const signedTxProtobuf = await provider.signRawTx({
         rawTx: rawTxProtobuf,
-        notes: txNotes.notes,
-        spendConditions: txNotes.spendConditions,
+        notes: txNotesArray,
+        spendConditions: txSpendConditionsArray,
       });
 
-      // broadcast transaction
-      const signedTx = wasm.RawTx.fromProtobuf(signedTxProtobuf);
+      wasmCleanup.register(wasm.RawTx.fromProtobuf(signedTxProtobuf));
       await grpcClient.sendTransaction(signedTxProtobuf);
 
-      // verify transaction was accepted into mempool before polling for inclusion
-      await checkTransactionAcceptance(grpcClient, txId, {
+      await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), txId, {
         intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
         maxAttempts: ACCEPTANCE_CHECK_MAX_ATTEMPTS,
       });
 
-      // Clean up 
-      signedTx.free();
-      builder.free();
-      notes.forEach((n: wasm.Note) => n.free());
-      lockRootDigest.free();
-      lockRoot.free();
-      inputPkh.free();
-      inputSpendCondition.free();
-      refundPkh.free();
-      refundLock.free();
-      spendBuilder.free();
-      seed.free();
-
-      // transaction accepted - start polling for note inclusion
       startPollingForNote(wallet.id, wallet.lock_root_hash!);
     } catch (err: any) {
       setError(err.message || 'Failed to fund wallet');
@@ -234,7 +241,6 @@ export default function WalletList() {
   };
 
   const startPollingForNote = (walletId: string, lockRootHash: string) => {
-    // stop any existing polling for this wallet
     stopPollingForNote(walletId);
     
     if (!grpcEndpoint) {
@@ -242,41 +248,25 @@ export default function WalletList() {
       return;
     }
     
-    // Mark as polling
     setPollingWallets(prev => new Set([...prev, walletId]));
     
     const { promise, cleanup } = pollForTransactionInclusionWithCleanup(
       async () => {
-        await wasm.default();
-        const grpcClient = new wasm.GrpcClient(grpcEndpoint);
+        if (!isMountedRef.current) return false;
+        
+        const grpcClient = await getGrpcClient(grpcEndpoint);
         const balance = await grpcClient.getBalanceByFirstName(lockRootHash);
-        
-        const isFunded = balance?.notes && balance.notes.length > 0;
-        
-        // Clean up note objects if they exist
-        if (balance?.notes) {
-          for (const n of balance.notes) {
-            const note = wasm.Note.fromProtobuf(n.note);
-            note.free();
-          }
-        }
-        
-        return isFunded;
+        return balance?.notes && balance.notes.length > 0;
       },
       {
         intervalMs: INCLUSION_POLL_INTERVAL_MS,
         maxDurationMs: INCLUSION_POLL_MAX_DURATION_MS,
         onIncluded: async () => {
-          // Note found - reload wallets to update UI
+          if (!isMountedRef.current) return;
           await loadWallets();
           stopPollingForNote(walletId);
         },
-        onPoll: (attempt) => {
-          // Optional: log polling progress
-          if (attempt % 6 === 0) { // Log every minute (6 attempts * 10s = 60s)
-            console.log(`Polling for wallet ${walletId} note inclusion (attempt ${attempt})...`);
-          }
-        },
+        onPoll: () => {},
         timeoutErrorMessage: `Transaction for wallet ${walletId} was not included within ${INCLUSION_POLL_MAX_DURATION_MS / 1000 / 60} minutes.`,
       }
     );
@@ -285,14 +275,13 @@ export default function WalletList() {
     
     promise
       .then((isIncluded) => {
-        if (isIncluded) {
-          console.log(`Wallet ${walletId} note successfully included!`);
-        }
+        if (!isMountedRef.current) return;
+        if (isIncluded) stopPollingForNote(walletId);
       })
       .catch((error) => {
+        if (!isMountedRef.current) return;
         console.error(`Polling failed for wallet ${walletId}:`, error);
         stopPollingForNote(walletId);
-        // Optionally show error to user
         setError(`Failed to confirm transaction inclusion: ${error.message}`);
       });
   };

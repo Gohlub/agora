@@ -1,7 +1,57 @@
 import { useEffect, useRef } from 'react';
-
+import { wasm } from '@nockbox/iris-sdk';
 
 type WasmObject = { free: () => void };
+
+/**
+ * Singleton WASM initialization.
+ */
+let wasmInitialized = false;
+let wasmInitializing: Promise<void> | null = null;
+
+export async function ensureWasmInitialized(): Promise<void> {
+  if (wasmInitialized) return;
+  if (wasmInitializing) return wasmInitializing;
+  
+  wasmInitializing = (async () => {
+    await wasm.default();
+    wasmInitialized = true;
+  })();
+  
+  return wasmInitializing;
+}
+
+/**
+ * Singleton GrpcClient per endpoint.
+ * 
+ * This prevents WASM closure errors by ensuring only one GrpcClient exists
+ * per endpoint.
+ * 
+ */
+const grpcClients = new Map<string, wasm.GrpcClient>();
+const grpcClientPromises = new Map<string, Promise<wasm.GrpcClient>>();
+
+export async function getGrpcClient(endpoint: string): Promise<wasm.GrpcClient> {
+  // Return existing client if we have one
+  const existing = grpcClients.get(endpoint);
+  if (existing) return existing;
+  
+  // If we're already creating one, wait for it
+  const inProgress = grpcClientPromises.get(endpoint);
+  if (inProgress) return inProgress;
+  
+  // Create new client (only one creation per endpoint ever runs)
+  const promise = (async () => {
+    await ensureWasmInitialized();
+    const client = new wasm.GrpcClient(endpoint);
+    grpcClients.set(endpoint, client);
+    grpcClientPromises.delete(endpoint);
+    return client;
+  })();
+  
+  grpcClientPromises.set(endpoint, promise);
+  return promise;
+}
 
 /**
  * Manages WASM object lifecycle and prevents double-free
@@ -36,13 +86,9 @@ export class WasmResourceManager {
       if (obj && !this.freedObjects.has(obj)) {
         try {
           obj.free();
-        } catch (error) {
-            console.log(error)
-          // if free() throws, the object is likely already freed
-          // (e.g., freed by a parent object). Silently ignore.
+        } catch {
+          // Object likely already freed by a parent - ignore
         } finally {
-          // Always mark as freed, even if free() threw an error
-          // This prevents trying to free it again
           this.freedObjects.add(obj);
         }
       }
@@ -60,7 +106,6 @@ export class WasmResourceManager {
 
 /**
  * React hook for managing WASM object cleanup in components
- * Automatically cleans up on unmount
  */
 export function useWasmCleanup() {
   const managerRef = useRef<WasmResourceManager | null>(null);
