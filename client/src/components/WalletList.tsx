@@ -73,21 +73,29 @@ export default function WalletList() {
       setLoading(true);
       const data = await apiClient.listMultisigs(pkh);
       
-      // Singleton GrpcClient - same instance reused across mounts, preventing WASM closure errors
+      // Show wallets immediately (without balance data)
+      const initialWallets: WalletWithStatus[] = data
+        .filter(w => w.lock_root_hash && typeof w.lock_root_hash === 'string')
+        .map(wallet => ({
+          ...wallet,
+          lock_root_hash: wallet.lock_root_hash,
+          isFunded: undefined, // Unknown until we check
+          balance: undefined,
+        }));
+      
+      if (isMountedRef.current) {
+        setWallets(initialWallets);
+        setLoading(false);
+      }
+      
+      // Then fetch balances and update each wallet as data comes in
       const grpcClient = await getGrpcClient(grpcEndpoint);
       
-      const walletsWithStatus: WalletWithStatus[] = [];
-      
-      for (const wallet of data) {
+      for (const wallet of initialWallets) {
+        if (!isMountedRef.current) return;
+        
         try {
-          const lockRootHash = wallet.lock_root_hash;
-          
-          if (!lockRootHash || typeof lockRootHash !== 'string' || lockRootHash.length === 0) {
-            console.error(`Wallet ${wallet.id} has invalid lock_root_hash`);
-            continue;
-          }
-          
-          const balance = await grpcClient.getBalanceByFirstName(lockRootHash);
+          const balance = await grpcClient.getBalanceByFirstName(wallet.lock_root_hash);
           
           const isFunded = balance?.notes && balance.notes.length > 0;
           let totalBalance = 0;
@@ -104,27 +112,20 @@ export default function WalletList() {
             }
           }
           
-          walletsWithStatus.push({
-            ...wallet,
-            lock_root_hash: lockRootHash,
-            isFunded,
-            balance: totalBalance,
-            notes: notes.length > 0 ? notes : undefined,
-          });
+          if (isMountedRef.current) {
+            setWallets(prev => prev.map(w => 
+              w.id === wallet.id 
+                ? { ...w, isFunded, balance: totalBalance, notes: notes.length > 0 ? notes : undefined }
+                : w
+            ));
+          }
         } catch (e: any) {
-          console.error(`Failed to process wallet ${wallet.id}:`, e);
+          console.error(`Failed to fetch balance for wallet ${wallet.id}:`, e);
         }
-      }
-      
-      if (isMountedRef.current) {
-        setWallets(walletsWithStatus);
       }
     } catch (err: any) {
       if (isMountedRef.current) {
         setError(err.message || 'Failed to load wallets');
-      }
-    } finally {
-      if (isMountedRef.current) {
         setLoading(false);
       }
     }
@@ -342,6 +343,7 @@ export default function WalletList() {
         <div style={{ display: 'grid', gap: '1rem' }}>
           {wallets.map((wallet) => {
             const isFunding = funding.has(wallet.id);
+            const isLoadingBalance = wallet.isFunded === undefined;
             const isFunded = wallet.isFunded || false;
             const balance = wallet.balance || 0;
             const balanceNock = balance / 65536;
@@ -362,7 +364,16 @@ export default function WalletList() {
                     <p style={{ marginTop: '0.5rem', color: '#666', fontSize: '0.875rem' }}>
                       {wallet.threshold} of {wallet.total_signers} signatures required
                     </p>
-                    {isFunded ? (
+                    {isLoadingBalance ? (
+                      <p style={{ 
+                        marginTop: '0.5rem', 
+                        color: '#999', 
+                        fontSize: '0.875rem',
+                        fontStyle: 'italic',
+                      }}>
+                        Loading balance...
+                      </p>
+                    ) : isFunded ? (
                       <p style={{ 
                         marginTop: '0.5rem', 
                         color: '#28a745', 
@@ -403,7 +414,7 @@ export default function WalletList() {
                       </p>
                     )}
                   </div>
-                  {!isFunded && (
+                  {!isFunded && !isLoadingBalance && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginLeft: '1rem' }}>
                       <input
                         type="number"
