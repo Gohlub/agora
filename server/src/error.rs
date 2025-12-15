@@ -28,23 +28,23 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let (status, error_code, error_message) = match self {
             AppError::Database(ref e) => {
                 tracing::error!("Database error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+                (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", "Database error")
             }
-            AppError::InvalidInput(ref msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
-            AppError::Unauthorized(ref msg) => (StatusCode::UNAUTHORIZED, msg.as_str()),
-            AppError::NotFound(ref msg) => (StatusCode::NOT_FOUND, msg.as_str()),
+            AppError::InvalidInput(ref msg) => (StatusCode::BAD_REQUEST, "INVALID_INPUT", msg.as_str()),
+            AppError::Unauthorized(ref msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg.as_str()),
+            AppError::NotFound(ref msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.as_str()),
             AppError::Internal(ref msg) => {
                 tracing::error!("Internal error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error")
             }
         };
 
         let body = Json(json!({
-            "error": error_message,
-            "message": self.to_string(),
+            "error": error_code,
+            "message": error_message,
         }));
 
         (status, body).into_response()
