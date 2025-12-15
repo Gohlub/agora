@@ -17,7 +17,7 @@ pub struct Lock {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct LockParticipant {
-    pub lock_id: String,
+    pub lock_root_hash: String,
     pub pkh: String,
 }
 
