@@ -91,9 +91,9 @@ async fn create_multisig(
     // insert multisig wallet participants
     for pkh in &req.signer_pkhs {
         sqlx::query(
-            "INSERT INTO lock_participants (lock_id, pkh) VALUES (?, ?)"
+            "INSERT INTO lock_participants (lock_root_hash, pkh) VALUES (?, ?)"
         )
-        .bind(multisig_id.to_string())
+        .bind(&req.lock_root_hash)
         .bind(pkh)
         .execute(&pool)
         .await?;
@@ -113,7 +113,7 @@ async fn list_multisigs(
         sqlx::query_as::<_, Lock>(
             "SELECT DISTINCT l.id, l.threshold, l.total_signers, l.created_at, l.created_by_pkh, l.lock_root_hash 
              FROM locks l 
-             INNER JOIN lock_participants lp ON l.id = lp.lock_id 
+             INNER JOIN lock_participants lp ON l.lock_root_hash = lp.lock_root_hash 
              WHERE lp.pkh = ?"
         )
         .bind(pkh)
@@ -155,9 +155,9 @@ async fn get_multisig(
     
     // Get participants
     let participants: Vec<LockParticipant> = sqlx::query_as::<_, LockParticipant>(
-        "SELECT lock_id, pkh FROM lock_participants WHERE lock_id = ?"
+        "SELECT lock_root_hash, pkh FROM lock_participants WHERE lock_root_hash = ?"
     )
-    .bind(&id)
+    .bind(&lock.lock_root_hash)
     .fetch_all(&pool)
     .await?;
     
