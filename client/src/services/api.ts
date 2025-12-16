@@ -99,6 +99,7 @@ class ApiClient {
     spend_conditions_json: string;
     total_input_nicks: number;
     seeds: Array<{ recipient: string; amount_nicks: number }>;
+    proposer_signed_tx_json: string; // Proposer signs at creation
   }): Promise<{ id: string; tx_id: string }> {
     try {
       const response = await this.client.post('/api/proposals', data);
@@ -151,6 +152,22 @@ class ApiClient {
       const response = await this.client.post(`/api/proposals/${id}/broadcast`, {
         broadcaster_pkh: broadcasterPkh,
       });
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  // Direct spend for 1-of-n wallets - bypasses proposal flow
+  async directSpend(data: {
+    tx_id: string;
+    lock_root_hash: string;
+    sender_pkh: string;
+    total_input_nicks: number;
+    seeds: Array<{ recipient: string; amount_nicks: number }>;
+  }): Promise<{ success: boolean; history_id: string }> {
+    try {
+      const response = await this.client.post('/api/proposals/direct', data);
       return response.data;
     } catch (error) {
       this.handleError(error);
