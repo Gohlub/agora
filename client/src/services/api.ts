@@ -53,7 +53,7 @@ class ApiClient {
     totalSigners: number,
     signerPkhs: string[],
     createdByPkh: string
-  ): Promise<{ id: string }> {
+  ): Promise<{ lock_root_hash: string }> {
     try {
       const response = await this.client.post('/api/multisigs', {
         lock_root_hash: lockRootHash,
@@ -78,9 +78,91 @@ class ApiClient {
     }
   }
 
-  async getMultisig(id: string): Promise<any> {
+  async getMultisig(lockRootHash: string): Promise<any> {
     try {
-      const response = await this.client.get(`/api/multisigs/${id}`);
+      const response = await this.client.get(`/api/multisigs/${lockRootHash}`);
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  // === Proposal endpoints ===
+
+  async createProposal(data: {
+    tx_id: string;
+    lock_root_hash: string;
+    proposer_pkh: string;
+    threshold: number;
+    raw_tx_json: string;
+    notes_json: string;
+    spend_conditions_json: string;
+    total_input_nicks: number;
+    seeds: Array<{ recipient: string; amount_nicks: number }>;
+  }): Promise<{ id: string; tx_id: string }> {
+    try {
+      const response = await this.client.post('/api/proposals', data);
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  async listProposals(params?: {
+    pkh?: string;
+    lock_root_hash?: string;
+    status?: string;
+  }): Promise<any[]> {
+    try {
+      const response = await this.client.get('/api/proposals', { params });
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  async getProposal(id: string): Promise<any> {
+    try {
+      const response = await this.client.get(`/api/proposals/${id}`);
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  async signProposal(id: string, signerPkh: string, signedTxJson: string): Promise<{
+    success: boolean;
+    signatures_collected: number;
+    ready_to_broadcast: boolean;
+  }> {
+    try {
+      const response = await this.client.post(`/api/proposals/${id}/sign`, {
+        signer_pkh: signerPkh,
+        signed_tx_json: signedTxJson,
+      });
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  async markProposalBroadcast(id: string, broadcasterPkh: string): Promise<any> {
+    try {
+      const response = await this.client.post(`/api/proposals/${id}/broadcast`, {
+        broadcaster_pkh: broadcasterPkh,
+      });
+      return response.data;
+    } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  async getTransactionHistory(params?: {
+    pkh?: string;
+    lock_root_hash?: string;
+  }): Promise<any[]> {
+    try {
+      const response = await this.client.get('/api/proposals/history', { params });
       return response.data;
     } catch (error) {
       this.handleError(error);

@@ -4,7 +4,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use crate::db::{DbPool, Lock, LockParticipant};
 use crate::error::AppError;
 
@@ -19,7 +18,7 @@ struct CreateMultisigRequest {
 
 #[derive(Debug, Serialize)]
 struct CreateMultisigResponse {
-    id: String,
+    lock_root_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,30 +28,18 @@ struct ListMultisigsQuery {
 
 #[derive(Debug, Serialize)]
 struct MultisigResponse {
-    id: String,
     lock_root_hash: String, 
     threshold: i32,
     total_signers: i32,
     created_at: String,
     created_by_pkh: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MultisigDetailResponse {
-    id: String,
-    lock_root_hash: String, 
-    threshold: i32,
-    total_signers: i32,
-    created_at: String,
-    created_by_pkh: String,
-    // need this to reconstruct spending condition
     participants: Vec<String>, 
 }
 
 pub fn router() -> Router<DbPool> {
     Router::new()
         .route("/", post(create_multisig).get(list_multisigs))
-        .route("/:id", get(get_multisig))
+        .route("/:lock_root_hash", get(get_multisig))
 }
 
 async fn create_multisig(
@@ -61,25 +48,22 @@ async fn create_multisig(
 ) -> Result<Json<CreateMultisigResponse>, AppError> {
     // Check if a multisig with this lock_root_hash already exists
     let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM locks WHERE lock_root_hash = ? LIMIT 1"
+        "SELECT lock_root_hash FROM locks WHERE lock_root_hash = ? LIMIT 1"
     )
     .bind(&req.lock_root_hash)
     .fetch_optional(&pool)
     .await?;
     
-    if let Some(existing_id) = existing {
+    if existing.is_some() {
         return Err(AppError::InvalidInput(
-            format!("A multisig with this spending condition already exists (ID: {})", existing_id)
+            "A multisig with this spending condition already exists".to_string()
         ));
     }
     
-    let multisig_id = Uuid::new_v4();
-    
     // insert multisig spending condition 
     sqlx::query(
-        "INSERT INTO locks (id, lock_root_hash, threshold, total_signers, created_at, created_by_pkh) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO locks (lock_root_hash, threshold, total_signers, created_at, created_by_pkh) VALUES (?, ?, ?, ?, ?)"
     )
-    .bind(multisig_id.to_string())
     .bind(&req.lock_root_hash)
     .bind(req.threshold)
     .bind(req.total_signers)
@@ -100,7 +84,7 @@ async fn create_multisig(
     }
     
     Ok(Json(CreateMultisigResponse {
-        id: multisig_id.to_string(),
+        lock_root_hash: req.lock_root_hash,
     }))
 }
 
@@ -111,7 +95,7 @@ async fn list_multisigs(
     let locks: Vec<Lock> = if let Some(pkh) = params.pkh {
         // Get multisigs where this PKH is a participant
         sqlx::query_as::<_, Lock>(
-            "SELECT DISTINCT l.id, l.threshold, l.total_signers, l.created_at, l.created_by_pkh, l.lock_root_hash 
+            "SELECT DISTINCT l.lock_root_hash, l.threshold, l.total_signers, l.created_at, l.created_by_pkh 
              FROM locks l 
              INNER JOIN lock_participants lp ON l.lock_root_hash = lp.lock_root_hash 
              WHERE lp.pkh = ?"
@@ -121,20 +105,45 @@ async fn list_multisigs(
         .await?
     } else {
         sqlx::query_as::<_, Lock>(
-            "SELECT id, threshold, total_signers, created_at, created_by_pkh, lock_root_hash FROM locks"
+            "SELECT lock_root_hash, threshold, total_signers, created_at, created_by_pkh FROM locks"
         )
         .fetch_all(&pool)
         .await?
     };
     
+    if locks.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    
+    // Fetch all participants for the retrieved locks in a single query
+    let lock_hashes: Vec<&str> = locks.iter().map(|l| l.lock_root_hash.as_str()).collect();
+    let placeholders = lock_hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let query = format!(
+        "SELECT lock_root_hash, pkh FROM lock_participants WHERE lock_root_hash IN ({})",
+        placeholders
+    );
+    
+    let mut query_builder = sqlx::query_as::<_, LockParticipant>(&query);
+    for hash in &lock_hashes {
+        query_builder = query_builder.bind(*hash);
+    }
+    let all_participants: Vec<LockParticipant> = query_builder.fetch_all(&pool).await?;
+    
+    // Group participants by lock_root_hash
+    let mut participants_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for p in all_participants {
+        participants_map.entry(p.lock_root_hash).or_default().push(p.pkh);
+    }
+    
     let response: Vec<MultisigResponse> = locks.into_iter().map(|lock| {
+        let participants = participants_map.remove(&lock.lock_root_hash).unwrap_or_default();
         MultisigResponse {
-            id: lock.id,
             lock_root_hash: lock.lock_root_hash,
             threshold: lock.threshold,
             total_signers: lock.total_signers,
             created_at: lock.created_at,
             created_by_pkh: lock.created_by_pkh,
+            participants,
         }
     }).collect();
     
@@ -143,15 +152,15 @@ async fn list_multisigs(
 
 async fn get_multisig(
     State(pool): State<DbPool>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<MultisigDetailResponse>, AppError> {
+    axum::extract::Path(lock_root_hash): axum::extract::Path<String>,
+) -> Result<Json<MultisigResponse>, AppError> {
     let lock: Lock = sqlx::query_as::<_, Lock>(
-        "SELECT id, threshold, total_signers, created_at, created_by_pkh, lock_root_hash FROM locks WHERE id = ?"
+        "SELECT lock_root_hash, threshold, total_signers, created_at, created_by_pkh FROM locks WHERE lock_root_hash = ?"
     )
-    .bind(&id)
+    .bind(&lock_root_hash)
     .fetch_optional(&pool)
     .await?
-    .ok_or_else(|| AppError::NotFound(format!("Multisig {} not found", id)))?;
+    .ok_or_else(|| AppError::NotFound(format!("Multisig {} not found", lock_root_hash)))?;
     
     // Get participants
     let participants: Vec<LockParticipant> = sqlx::query_as::<_, LockParticipant>(
@@ -163,8 +172,7 @@ async fn get_multisig(
     
     let pkhs: Vec<String> = participants.into_iter().map(|p| p.pkh).collect();
     
-    Ok(Json(MultisigDetailResponse {
-        id: lock.id,
+    Ok(Json(MultisigResponse {
         lock_root_hash: lock.lock_root_hash,
         threshold: lock.threshold,
         total_signers: lock.total_signers,
