@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { wasm } from '@nockbox/iris-sdk';
+import * as wasm from '../wasm';
 import { getGrpcClient } from '../utils/wasm-cleanup';
 
 interface WalletState {

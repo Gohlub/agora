@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { wasm } from '@nockbox/iris-sdk';
+import * as wasm from '../wasm';
 
 type WasmObject = { free: () => void };
 

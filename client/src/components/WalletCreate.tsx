@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
-import { wasm } from '@nockbox/iris-sdk';
+import * as wasm from '../wasm';
 import { useWasmCleanup } from '../utils/wasm-cleanup';
 
 export default function WalletCreate() {
