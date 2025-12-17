@@ -3,16 +3,13 @@ import { Link } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
 import { NockchainProvider } from '@nockbox/iris-sdk';
-import * as wasm from '../wasm';
 import { 
-  checkTransactionAcceptance, 
-  pollForTransactionInclusionWithCleanup,
-  ACCEPTANCE_CHECK_INTERVAL_MS,
-  ACCEPTANCE_CHECK_MAX_ATTEMPTS,
-  INCLUSION_POLL_INTERVAL_MS,
-  INCLUSION_POLL_MAX_DURATION_MS
-} from '../utils/tx-lifecycle';
-import { useWasmCleanup, getGrpcClient } from '../utils/wasm-cleanup';
+  getGrpcClient, 
+  useWasmCleanup, 
+  buildMultisigSpendCondition,
+  buildUnsignedMultisigFundingTx,
+  ensureWasmInitialized 
+} from '../utils/wasm-utils';
 import TransactionProposal from './TransactionProposal';
 import PendingProposals from './PendingProposals';
 import TransactionHistory from './TransactionHistory';
@@ -64,14 +61,51 @@ interface WalletWithStatus {
 export default function WalletList() {
   const [wallets, setWallets] = useState<WalletWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [funding, setFunding] = useState<Set<string>>(new Set());
-  const [fundingAmounts, setFundingAmounts] = useState<Map<string, number>>(new Map());
-  const [pollingWallets, setPollingWallets] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [funding, setFunding] = useState<Set<string>>(new Set());
+  const [fundingAmounts, setFundingAmounts] = useState<Map<string, string>>(new Map());
+  const [fundingStatus, setFundingStatus] = useState<string | null>(null);
   const { pkh, grpcEndpoint } = useWalletStore();
-  const pollingCleanups = useRef<Map<string, () => void>>(new Map());
-  const wasmCleanup = useWasmCleanup();
   const isMountedRef = useRef(true);
+  const wasmCleanup = useWasmCleanup();
+  
+  // Persistent provider instance - reuse across operations
+  const providerRef = useRef<NockchainProvider | null>(null);
+  
+  /**
+   * Get or create the Iris provider, ensuring it's connected
+   */
+  const getConnectedProvider = async (): Promise<NockchainProvider> => {
+    // Create provider if it doesn't exist
+    if (!providerRef.current) {
+      providerRef.current = new NockchainProvider();
+    }
+    
+    const provider = providerRef.current;
+    
+    // Check if already connected
+    if (provider.isConnected) {
+      return provider;
+    }
+    
+    // Not connected - establish connection
+    try {
+      await provider.connect();
+      
+      // Give the extension a moment to fully initialize after connection
+      // This prevents race conditions where signRawTx is called too quickly
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      return provider;
+    } catch (connectErr: any) {
+      // Reset provider on connection failure so next attempt starts fresh
+      providerRef.current = null;
+      throw new Error(
+        `Failed to connect to Iris wallet: ${connectErr?.message || 'Unknown error'}. ` +
+        `Make sure the Iris extension is installed and unlocked.`
+      );
+    }
+  };
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -82,10 +116,100 @@ export default function WalletList() {
     
     return () => {
       isMountedRef.current = false;
-      pollingCleanups.current.forEach(cleanup => cleanup());
-      pollingCleanups.current.clear();
     };
   }, [pkh, grpcEndpoint]);
+
+  /**
+   * Fund a multisig wallet by creating a transaction that sends funds to the multisig spend condition.
+   */
+  const handleFundWallet = async (wallet: WalletWithStatus) => {
+    if (!pkh || !grpcEndpoint) {
+      setError('Wallet not connected');
+      return;
+    }
+
+    const lockRootHash = wallet.lock_root_hash;
+    
+    try {
+      setFunding(prev => new Set([...prev, lockRootHash]));
+      setError(null);
+      setFundingStatus('Initializing...');
+
+      await ensureWasmInitialized();
+
+      // Get funding amount (default: 1 NOCK = 65536 nicks)
+      const amountNock = parseFloat(fundingAmounts.get(lockRootHash) || '1') || 1;
+      const amountNicks = Math.floor(amountNock * 65536);
+
+      // Build the multisig spend condition
+      setFundingStatus('Preparing multisig lock...');
+      const multisigSpendCondition = await buildMultisigSpendCondition(
+        wallet.threshold,
+        wallet.participants,
+        wasmCleanup
+      );
+
+      // Build the unsigned transaction using the utility function
+      setFundingStatus('Building transaction...');
+      const unsignedTx = await buildUnsignedMultisigFundingTx({
+        userPkh: pkh,
+        grpcEndpoint,
+        amountNicks,
+        multisigSpendCondition,
+        cleanup: wasmCleanup,
+      });
+
+      // Get connected provider (reuses existing connection or establishes new one)
+      setFundingStatus('Connecting to Iris wallet...');
+      const provider = await getConnectedProvider();
+      
+      setFundingStatus('Requesting signature... (check Iris wallet popup)');
+      
+      const signedTxBytes = await provider.signRawTx({
+        rawTx: unsignedTx.rawTxProtobuf,
+        notes: unsignedTx.notesProtobufs,
+        spendConditions: unsignedTx.spendConditionsProtobufs,
+      });
+      
+      // Extract the transaction ID from the signed transaction
+      const idField = (signedTxBytes as any).id;
+      const signedTxId = typeof idField === 'string' ? idField : idField?.value;
+      
+      // Broadcast the transaction
+      setFundingStatus('Broadcasting transaction...');
+      const grpcClient = await getGrpcClient(grpcEndpoint);
+      await grpcClient.sendTransaction(signedTxBytes);
+
+      // Check acceptance
+      setFundingStatus('Confirming transaction...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      let accepted = false;
+      for (let i = 0; i < 3; i++) {
+        accepted = await grpcClient.transactionAccepted(signedTxId);
+        if (accepted) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      if (accepted) {
+        setFundingStatus(`Transaction confirmed! ID: ${signedTxId.substring(0, 16)}...`);
+      } else {
+        setFundingStatus(`Transaction broadcast! ID: ${signedTxId.substring(0, 16)}... (confirming...)`);
+      }
+      
+
+    } catch (err: any) {
+      providerRef.current = null;
+      setError('Signing failed/cancelled');
+      setFundingStatus(null);
+    } finally {
+      setFunding(prev => {
+        const next = new Set(prev);
+        next.delete(lockRootHash);
+        return next;
+      });
+    }
+  };
 
   const loadWallets = async () => {
     if (!pkh || !grpcEndpoint) return;
@@ -166,209 +290,70 @@ export default function WalletList() {
     }
   };
 
-  const handleFundWallet = async (wallet: WalletWithStatus) => {
-    if (!pkh || !grpcEndpoint || !wallet.lock_root_hash) {
-      setError('Wallet not connected or lock root hash missing');
-      return;
-    }
-
-    try {
-      setFunding(new Set([...funding, wallet.lock_root_hash]));
-      setError(null);
-
-      const provider = new NockchainProvider();
-      const grpcClient = await getGrpcClient(grpcEndpoint);
-
-      const userPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
-      const userSpendCondition = wasmCleanup.register(wasm.SpendCondition.newPkh(userPkh));
-      const userFirstName = wasmCleanup.register(userSpendCondition.firstName());
-      const userFirstNameValue = userFirstName.value;
-      const userBalance = await grpcClient.getBalanceByFirstName(userFirstNameValue);
-
-      if (!userBalance || !userBalance.notes || userBalance.notes.length === 0) {
-        throw new Error('No notes available to fund the multisig note');
-      }
-
-      // Convert notes from protobuf - these are needed for transaction building
-      const notes = userBalance.notes.map((n: any) => 
-        wasmCleanup.register(wasm.Note.fromProtobuf(n.note))
-      );
-      const note = notes[0];
-      const noteAssets = note.assets;
-
-      // get funding amount from state (default: 1 NOCK = 65536 nicks)
-      const amountNock = fundingAmounts.get(wallet.lock_root_hash) || 1;
-      const FUND_AMOUNT_NICKS = BigInt(Math.floor(amountNock * 65536));
-      const feePerWord = BigInt(32768); // 0.5 NOCK per word
-
-      if (noteAssets < FUND_AMOUNT_NICKS) {
-        throw new Error(`Insufficient funds: need ${FUND_AMOUNT_NICKS} nicks, have ${noteAssets}`);
-      }
-
-      // Build transaction to create a note bound to the multisig spending condition
-      const builder = wasmCleanup.register(new wasm.TxBuilder(feePerWord));
-
-      // create lock root hash as recipient (to initialize the multisig note)
-      const lockRootDigest = wasmCleanup.register(new wasm.Digest(wallet.lock_root_hash));
-      const lockRoot = wasmCleanup.register(wasm.LockRoot.fromHash(lockRootDigest));
-
-      const inputPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
-      const inputSpendCondition = wasmCleanup.register(wasm.SpendCondition.newPkh(inputPkh));
-      
-      const refundPkh = wasmCleanup.register(wasm.Pkh.single(pkh));
-      const refundLock = wasmCleanup.register(wasm.SpendCondition.newPkh(refundPkh));
-
-      // create SpendBuilder for the input note
-      const spendBuilder = wasmCleanup.register(new wasm.SpendBuilder(
-        notes[0],
-        inputSpendCondition,
-        refundLock
-      ));
-
-      // create seed that sends to lock-root hash (multisig spending condition)
-      const seed = wasmCleanup.register(new wasm.Seed(
-        null, // output_source
-        lockRoot, // lock_root (hash)
-        FUND_AMOUNT_NICKS, // gift
-        wasm.NoteData.empty(), // note_data
-        notes[0].hash() // parent_hash
-      ));
-
-      // add seed to spend builder
-      spendBuilder.seed(seed);
-
-      // compute refund and fee
-      spendBuilder.computeRefund(false);
-
-      // add spend to transaction builder
-      builder.spend(spendBuilder);
-
-      // recalculate and set fees
-      builder.recalcAndSetFee(false);
-
-      const nockchainTx = builder.build();
-      const txId = nockchainTx.id.value;
-      const rawTxProtobuf = nockchainTx.toRawTx().toProtobuf();
-      const txNotes = builder.allNotes();
-      const txNotesArray = txNotes.notes;
-      const txSpendConditionsArray = txNotes.spendConditions;
-
-      const signedTxProtobuf = await provider.signRawTx({
-        rawTx: rawTxProtobuf,
-        notes: txNotesArray,
-        spendConditions: txSpendConditionsArray,
-      });
-
-      wasmCleanup.register(wasm.RawTx.fromProtobuf(signedTxProtobuf));
-      await grpcClient.sendTransaction(signedTxProtobuf);
-
-      await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), txId, {
-        intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
-        maxAttempts: ACCEPTANCE_CHECK_MAX_ATTEMPTS,
-      });
-
-      startPollingForNote(wallet.lock_root_hash);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fund wallet');
-      console.error('Fund wallet error:', err);
-    } finally {
-      setFunding(new Set([...funding].filter(id => id !== wallet.lock_root_hash)));
-    }
-  };
-
-  const startPollingForNote = (lockRootHash: string) => {
-    stopPollingForNote(lockRootHash);
-    
-    if (!grpcEndpoint) {
-      setError('gRPC endpoint not available');
-      return;
-    }
-    
-    setPollingWallets(prev => new Set([...prev, lockRootHash]));
-    
-    const { promise, cleanup } = pollForTransactionInclusionWithCleanup(
-      async () => {
-        if (!isMountedRef.current) return false;
-        
-        const grpcClient = await getGrpcClient(grpcEndpoint);
-        const balance = await grpcClient.getBalanceByFirstName(lockRootHash);
-        return balance?.notes && balance.notes.length > 0;
-      },
-      {
-        intervalMs: INCLUSION_POLL_INTERVAL_MS,
-        maxDurationMs: INCLUSION_POLL_MAX_DURATION_MS,
-        onIncluded: async () => {
-          if (!isMountedRef.current) return;
-          await loadWallets();
-          stopPollingForNote(lockRootHash);
-        },
-        onPoll: () => {},
-        timeoutErrorMessage: `Transaction for wallet ${lockRootHash} was not included within ${INCLUSION_POLL_MAX_DURATION_MS / 1000 / 60} minutes.`,
-      }
-    );
-    
-    pollingCleanups.current.set(lockRootHash, cleanup);
-    
-    promise
-      .then((isIncluded) => {
-        if (!isMountedRef.current) return;
-        if (isIncluded) stopPollingForNote(lockRootHash);
-      })
-      .catch((error) => {
-        if (!isMountedRef.current) return;
-        console.error(`Polling failed for wallet ${lockRootHash}:`, error);
-        stopPollingForNote(lockRootHash);
-        setError(`Failed to confirm transaction inclusion: ${error.message}`);
-      });
-  };
-
-  const stopPollingForNote = (lockRootHash: string) => {
-    const cleanup = pollingCleanups.current.get(lockRootHash);
-    if (cleanup) {
-      cleanup();
-      pollingCleanups.current.delete(lockRootHash);
-    }
-    setPollingWallets(prev => {
-      const next = new Set(prev);
-      next.delete(lockRootHash);
-      return next;
-    });
-  };
-
-  if (loading) {
+   if (loading) {
     return <div>Loading wallets...</div>;
-  }
-
-  if (error) {
-    return (
-      <div style={{ 
-        padding: '1rem', 
-        backgroundColor: '#fee', 
-        color: '#c33', 
-        borderRadius: '4px',
-        marginBottom: '1rem'
-      }}>
-        Error: {error}
-      </div>
-    );
   }
 
   return (
     <div>
+      {/* Inline error notification - dismissible */}
+      {error && (
+        <div style={{ 
+          padding: '0.75rem 1rem', 
+          backgroundColor: '#fee', 
+          color: '#c33', 
+          borderRadius: '4px',
+          marginBottom: '1rem',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <span>{error}</span>
+          <button 
+            onClick={() => setError(null)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#c33',
+              cursor: 'pointer',
+              fontSize: '1.2rem',
+              padding: '0 0.5rem'
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
         <h1>Wallets</h1>
-        <Link
-          to="/wallets/create"
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: '#007bff',
-            color: 'white',
-            textDecoration: 'none',
-            borderRadius: '4px',
-          }}
-        >
-          Create Wallet
-        </Link>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            onClick={() => loadWallets()}
+            style={{
+              padding: '0.75rem 1rem',
+              backgroundColor: '#6c757d',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+            }}
+          >
+            ↻ Refresh
+          </button>
+          <Link
+            to="/wallets/create"
+            style={{
+              padding: '0.75rem 1.5rem',
+              backgroundColor: '#007bff',
+              color: 'white',
+              textDecoration: 'none',
+              borderRadius: '4px',
+            }}
+          >
+            Create Wallet
+          </Link>
+        </div>
       </div>
       
       {/* Pending proposals that need signatures */}
@@ -381,7 +366,6 @@ export default function WalletList() {
       ) : (
         <div style={{ display: 'grid', gap: '1rem' }}>
           {wallets.map((wallet) => {
-            const isFunding = funding.has(wallet.lock_root_hash);
             const isLoadingBalance = wallet.notes === undefined;
             const isFunded = wallet.notes && wallet.notes.length > 0;
             const balance = wallet.balance || 0;
@@ -399,7 +383,31 @@ export default function WalletList() {
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                   <div style={{ flex: 1 }}>
-                    <h3 style={{ margin: 0 }}>{`Wallet ${wallet.lock_root_hash.substring(0, 8)}`}</h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <h3 style={{ margin: 0 }}>{`Wallet ${wallet.lock_root_hash.substring(0, 8)}...`}</h3>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(wallet.lock_root_hash);
+                          // Brief visual feedback
+                          const btn = document.getElementById(`copy-${wallet.lock_root_hash}`);
+                          if (btn) {
+                            btn.textContent = '✓ Copied!';
+                            setTimeout(() => { btn.textContent = 'Copy Address'; }, 1500);
+                          }
+                        }}
+                        id={`copy-${wallet.lock_root_hash}`}
+                        style={{
+                          padding: '0.25rem 0.5rem',
+                          fontSize: '0.75rem',
+                          backgroundColor: '#f0f0f0',
+                          border: '1px solid #ccc',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Copy Address
+                      </button>
+                    </div>
                     <p style={{ marginTop: '0.5rem', color: '#666', fontSize: '0.875rem' }}>
                       {wallet.threshold} of {wallet.total_signers} signatures required
                     </p>
@@ -460,62 +468,58 @@ export default function WalletList() {
                         ⚠ Needs initialization - Wallet must be funded before transactions can be proposed
                       </p>
                     )}
-                    {pollingWallets.has(wallet.lock_root_hash) && (
-                      <p style={{ 
-                        marginTop: '0.5rem', 
-                        color: '#007bff', 
-                        fontSize: '0.875rem',
-                        fontStyle: 'italic'
-                      }}>
-                        🔄 Waiting for note confirmation...
-                      </p>
-                    )}
-                    {wallet.lock_root_hash && (
-                      <p style={{ 
-                        marginTop: '0.5rem', 
-                        color: '#999', 
-                        fontSize: '0.75rem',
-                        fontFamily: 'monospace',
-                        wordBreak: 'break-all'
-                      }}>
-                        {wallet.lock_root_hash.substring(0, 20)}...
-                      </p>
-                    )}
                   </div>
-                  {!isFunded && !isLoadingBalance && (
+                  {!isLoadingBalance && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginLeft: '1rem' }}>
-                      <input
-                        type="number"
-                        min="0.0001"
-                        step="0.0001"
-                        value={fundingAmounts.get(wallet.lock_root_hash) || 1}
-                        onChange={(e) => {
-                          const amount = parseFloat(e.target.value) || 1;
-                          setFundingAmounts(prev => new Map(prev).set(wallet.lock_root_hash, amount));
-                        }}
-                        placeholder="Amount (NOCK)"
-                        style={{
-                          padding: '0.5rem',
-                          border: '1px solid #ddd',
-                          borderRadius: '4px',
-                          width: '120px',
-                        }}
-                        disabled={isFunding || pollingWallets.has(wallet.lock_root_hash)}
-                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="1"
+                          value={fundingAmounts.get(wallet.lock_root_hash) || ''}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            if (value === '' || /^\d*\.?\d*$/.test(value)) {
+                              setFundingAmounts(prev => new Map(prev).set(wallet.lock_root_hash, value));
+                            }
+                          }}
+                          style={{
+                            padding: '0.25rem 0.5rem',
+                            border: '1px solid #ddd',
+                            borderRadius: '4px',
+                            width: '60px',
+                            textAlign: 'left',
+                          }}
+                          disabled={funding.has(wallet.lock_root_hash)}
+                        />
+                        <span style={{ color: '#666', fontSize: '0.875rem' }}>NOCK</span>
+                      </div>
                       <button
                         onClick={() => handleFundWallet(wallet)}
-                        disabled={isFunding || pollingWallets.has(wallet.lock_root_hash)}
+                        disabled={funding.has(wallet.lock_root_hash)}
                         style={{
                           padding: '0.5rem 1rem',
-                          backgroundColor: (isFunding || pollingWallets.has(wallet.lock_root_hash)) ? '#ccc' : '#007bff',
+                          backgroundColor: funding.has(wallet.lock_root_hash) ? '#ccc' : '#28a745',
                           color: 'white',
                           border: 'none',
                           borderRadius: '4px',
-                          cursor: (isFunding || pollingWallets.has(wallet.lock_root_hash)) ? 'not-allowed' : 'pointer',
+                          cursor: funding.has(wallet.lock_root_hash) ? 'not-allowed' : 'pointer',
                         }}
                       >
-                        {isFunding ? 'Funding...' : pollingWallets.has(wallet.lock_root_hash) ? 'Waiting...' : 'Initialize Note'}
+                        {funding.has(wallet.lock_root_hash) ? 'Funding...' : 'Fund Wallet'}
                       </button>
+                      {fundingStatus && funding.has(wallet.lock_root_hash) && (
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: '#007bff' }}>
+                          {fundingStatus}
+                        </p>
+                      )}
+                      <p style={{ 
+                        margin: 0, 
+                        fontSize: '0.7rem', 
+                        color: '#999',
+                        lineHeight: '1.3'
+                      }}>
+                      </p>
                     </div>
                   )}
                 </div>

@@ -27,7 +27,6 @@ export default function Layout({ children }: LayoutProps) {
           {pkh && (
             <>
               <Link to="/wallets" style={{ textDecoration: 'none', color: '#333' }}>Wallets</Link>
-              <Link to="/transactions" style={{ textDecoration: 'none', color: '#333' }}>Transactions</Link>
             </>
           )}
           <WalletConnectButton />

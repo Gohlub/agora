@@ -1,17 +1,11 @@
+import { Navigate } from 'react-router-dom';
 import { useWalletStore } from '../store/wallet';
 
 export default function Home() {
   const { pkh } = useWalletStore();
 
   if (pkh) {
-    return (
-      <div style={{ textAlign: 'center', padding: '2rem' }}>
-        <h1>Welcome to Agora</h1>
-        <p style={{ marginTop: '1rem', color: '#666' }}>
-          Your multisig wallet for Nockchain
-        </p>
-      </div>
-    );
+    return <Navigate to="/wallets" replace />;
   }
 
   return (

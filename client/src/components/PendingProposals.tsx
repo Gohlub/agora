@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
 import { NockchainProvider } from '@nockbox/iris-sdk';
@@ -6,9 +6,8 @@ import * as wasm from '../wasm';
 import { 
   checkTransactionAcceptance,
   ACCEPTANCE_CHECK_INTERVAL_MS,
-  ACCEPTANCE_CHECK_MAX_ATTEMPTS,
 } from '../utils/tx-lifecycle';
-import { useWasmCleanup, getGrpcClient } from '../utils/wasm-cleanup';
+import { useWasmCleanup, getGrpcClient, validateSignedTransaction } from '../utils/wasm-utils';
 
 interface SeedSummary {
   recipient: string;
@@ -54,6 +53,43 @@ export default function PendingProposals() {
   
   const { pkh, grpcEndpoint } = useWalletStore();
   const wasmCleanup = useWasmCleanup();
+  
+  // Persistent provider instance - reuse across operations
+  const providerRef = useRef<NockchainProvider | null>(null);
+  
+  /**
+   * Get or create the Iris provider, ensuring it's connected
+   */
+  const getConnectedProvider = async (): Promise<NockchainProvider> => {
+    // Create provider if it doesn't exist
+    if (!providerRef.current) {
+      providerRef.current = new NockchainProvider();
+    }
+    
+    const provider = providerRef.current;
+    
+    // Check if already connected
+    if (provider.isConnected) {
+      return provider;
+    }
+    
+    // Not connected - establish connection
+    try {
+      await provider.connect();
+      
+      // Give the extension a moment to fully initialize after connection
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      return provider;
+    } catch (connectErr: any) {
+      // Reset provider on connection failure so next attempt starts fresh
+      providerRef.current = null;
+      throw new Error(
+        `Failed to connect to Iris wallet: ${connectErr?.message || 'Unknown error'}. ` +
+        `Make sure the Iris extension is installed and unlocked.`
+      );
+    }
+  };
 
   useEffect(() => {
     if (pkh) {
@@ -106,10 +142,12 @@ export default function PendingProposals() {
         wasmCleanup.register(wasm.SpendCondition.fromProtobuf(sc))
       );
       
+      // Get connected provider (reuses existing connection or establishes new one)
+      setStatusMessage('Connecting to Iris wallet...');
+      const provider = await getConnectedProvider();
+      
       // Sign the transaction - this returns the signed tx with our signature
       setStatusMessage('Requesting signature from wallet...');
-      const provider = new NockchainProvider();
-      
       const signedTxProtobuf = await provider.signRawTx({
         rawTx: rawTxProtobuf,
         notes: wasmNotes,
@@ -124,14 +162,16 @@ export default function PendingProposals() {
       const result = await apiClient.signProposal(proposalId, pkh, signedTxJson);
       
       if (result.ready_to_broadcast) {
-        setStatusMessage(`✓ Signed! Transaction is ready to broadcast (${result.signatures_collected}/${proposal.threshold} signatures)`);
+        setStatusMessage(`Transaction is ready to broadcast (${result.signatures_collected}/${proposal.threshold} signatures)`);
       } else {
-        setStatusMessage(`✓ Signed! Waiting for more signatures (${result.signatures_collected}/${proposal.threshold})`);
+        setStatusMessage(`Waiting for more signatures (${result.signatures_collected}/${proposal.threshold})`);
       }
       
       // Refresh proposals
       await loadProposals();
     } catch (err: any) {
+      // Reset provider on failure so next attempt starts fresh
+      providerRef.current = null;
       setError(err.message || 'Failed to sign proposal');
       setStatusMessage(null);
     } finally {
@@ -151,7 +191,13 @@ export default function PendingProposals() {
       setStatusMessage('Loading proposal and signatures...');
 
       // Get full proposal details with all collected signatures
+      console.log('[Broadcast] Loading proposal:', proposalId);
       const proposal: ProposalDetail = await apiClient.getProposal(proposalId);
+      console.log('[Broadcast] Proposal loaded:', {
+        threshold: proposal.threshold,
+        signaturesCount: proposal.signatures.length,
+        signers: proposal.signers,
+      });
       
       if (proposal.signatures.length < proposal.threshold) {
         setError(`Not enough signatures: ${proposal.signatures.length}/${proposal.threshold}`);
@@ -161,39 +207,152 @@ export default function PendingProposals() {
       setStatusMessage('Aggregating signatures...');
       
       // Get all signed tx protobufs from the collected signatures
-      const signedTxProtobufs = proposal.signatures.map(sig => 
-        JSON.parse(sig.signed_tx_json)
-      );
+      // IMPORTANT: Different wallet extensions compute different IDs after signing.
+      // We normalize all IDs to match the FIRST signer's ID, since that transaction
+      // has a valid signature for its computed ID.
+      const signedTxProtobufs: any[] = [];
+      let baseId: string | null = null;
+      
+      for (const sig of proposal.signatures) {
+        console.log('[Broadcast] Parsing signature from:', sig.signer_pkh.slice(0, 12));
+        const parsed = JSON.parse(sig.signed_tx_json);
+        const parsedId = parsed.id?.value || parsed.id;
+        
+        if (baseId === null) {
+          // First signer - use their ID as the base
+          baseId = parsedId;
+          console.log(`[Broadcast] Using base ID from first signer: ${baseId?.slice(0, 16)}...`);
+        } else if (parsedId !== baseId) {
+          // Subsequent signers - normalize to base ID
+          console.log(`[Broadcast] Normalizing ID from ${parsedId?.slice(0, 16)}... to ${baseId?.slice(0, 16)}...`);
+          if (parsed.id?.value) {
+            parsed.id.value = baseId;
+          } else {
+            parsed.id = baseId;
+          }
+        }
+        
+        signedTxProtobufs.push(parsed);
+      }
+      
+      console.log('[Broadcast] Merging', signedTxProtobufs.length, 'signatures with threshold', proposal.threshold);
       
       // For m-of-n multisig, we need to merge signatures from all signers.
       // Each signed tx contains one signer's signature in the witness.
       // Use mergeSignatures to combine signatures into one tx.
       // We pass the threshold to only include the minimum required signatures (minimizes fees).
-      const mergedRawTx = wasmCleanup.register(
-        wasm.RawTx.mergeSignatures(signedTxProtobufs, proposal.threshold)
-      );
+      let mergedRawTx;
+      try {
+        mergedRawTx = wasmCleanup.register(
+          wasm.RawTx.mergeSignatures(signedTxProtobufs, proposal.threshold)
+        );
+        console.log('[Broadcast] Signatures merged successfully');
+      } catch (mergeErr: any) {
+        console.error('[Broadcast] Merge failed:', mergeErr);
+        throw new Error(`Failed to merge signatures: ${mergeErr?.message || mergeErr}`);
+      }
+      
+      // CRITICAL: Recalculate the transaction ID after merging signatures.
+      // The merge uses the first signer's ID, but the network computes ID from (version, spends)
+      // which now has combined signatures - a different hash!
+      const recalculatedId = mergedRawTx.recalcId();
+      const correctTxId = recalculatedId.value;
+      console.log('[Broadcast] Recalculated TX ID:', correctTxId.slice(0, 16));
+      console.log('[Broadcast] Previous base ID was:', baseId?.slice(0, 16));
+      
+      // Get the protobuf and update the ID to the correct one
       const finalSignedTx = mergedRawTx.toProtobuf();
+      const oldId = finalSignedTx.id?.value || finalSignedTx.id;
+      
+      // Update the ID in the protobuf to match the recalculated ID
+      if (finalSignedTx.id?.value) {
+        finalSignedTx.id.value = correctTxId;
+      } else {
+        finalSignedTx.id = correctTxId;
+      }
+      console.log('[Broadcast] Updated TX ID from', oldId.slice(0, 16), 'to', correctTxId.slice(0, 16));
+      
+      // Validate the merged transaction before broadcasting
+      setStatusMessage('Validating merged transaction...');
+      const notesProtobufs = JSON.parse(proposal.notes_json);
+      const spendConditionsProtobufs = JSON.parse(proposal.spend_conditions_json);
+      
+      const validation = await validateSignedTransaction({
+        signedTxProtobuf: finalSignedTx,
+        notesProtobufs,
+        spendConditionsProtobufs,
+        cleanup: wasmCleanup,
+      });
+      
+      if (!validation.valid) {
+        console.error('[Broadcast] Validation failed:', validation.error);
+        throw new Error(`Transaction validation failed: ${validation.error}`);
+      }
+      console.log('[Broadcast] Validation passed');
       
       // Send the transaction
       setStatusMessage('Broadcasting transaction...');
+      console.log('[Broadcast] Sending to', grpcEndpoint);
       const grpcClient = await getGrpcClient(grpcEndpoint);
-      await grpcClient.sendTransaction(finalSignedTx);
       
-      // Check acceptance
+      try {
+        await grpcClient.sendTransaction(finalSignedTx);
+        console.log('[Broadcast] Transaction sent successfully');
+      } catch (sendErr: any) {
+        console.error('[Broadcast] Send failed:', sendErr);
+        throw new Error(`Failed to send transaction: ${sendErr?.message || sendErr}`);
+      }
+      
+      // Check acceptance using the recalculated ID (this should be the correct one)
       setStatusMessage('Checking acceptance...');
-      await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), proposal.tx_id, {
-        intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
-        maxAttempts: ACCEPTANCE_CHECK_MAX_ATTEMPTS,
-      });
+      console.log('[Broadcast] Checking acceptance for TX:', correctTxId.slice(0, 16));
       
-      // Mark as broadcast on backend
-      await apiClient.markProposalBroadcast(proposalId, pkh);
+      let accepted = false;
+      try {
+        await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), correctTxId, {
+          intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
+          maxAttempts: 5,
+        });
+        console.log('[Broadcast] Transaction accepted!');
+        accepted = true;
+      } catch (e) {
+        console.warn('[Broadcast] Primary ID not accepted, trying fallbacks...');
+        
+        // Try other possible IDs as fallback
+        const fallbackIds = [baseId, proposal.tx_id].filter(
+          (id): id is string => !!id && id !== correctTxId
+        );
+        
+        for (const txId of fallbackIds) {
+          console.log('[Broadcast] Trying fallback ID:', txId.slice(0, 16));
+          try {
+            await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), txId, {
+              intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
+              maxAttempts: 2,
+            });
+            console.log('[Broadcast] Transaction accepted with fallback ID:', txId.slice(0, 16));
+            accepted = true;
+            break;
+          } catch {
+            console.log('[Broadcast] Fallback ID not accepted:', txId.slice(0, 16));
+          }
+        }
+      }
       
-      setStatusMessage(`✓ Transaction broadcast! ID: ${proposal.tx_id.substring(0, 16)}...`);
+      if (!accepted) {
+        console.warn('[Broadcast] Transaction not accepted with any known ID. Check block explorer manually.');
+      }
+      
+      // Mark as broadcast on backend with the CORRECT tx_id (after merging signatures)
+      await apiClient.markProposalBroadcast(proposalId, pkh, correctTxId);
+      console.log('[Broadcast] Recorded final TX ID:', correctTxId);
+      
+      setStatusMessage(`Transaction broadcast! ID: ${correctTxId.substring(0, 16)}...`);
       
       // Refresh proposals
       await loadProposals();
     } catch (err: any) {
+      console.error('[Broadcast] Error:', err);
       setError(err.message || 'Failed to broadcast transaction');
       setStatusMessage(null);
     } finally {
@@ -222,7 +381,7 @@ export default function PendingProposals() {
   }
 
   if (proposals.length === 0) {
-    return null; // Don't show anything if no pending proposals
+    return null; 
   }
 
   return (

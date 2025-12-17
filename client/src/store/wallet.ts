@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import * as wasm from '../wasm';
-import { getGrpcClient } from '../utils/wasm-cleanup';
+import { getGrpcClient } from '../utils/wasm-utils';
 
 interface WalletState {
   pkh: string | null;

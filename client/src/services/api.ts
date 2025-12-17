@@ -147,10 +147,11 @@ class ApiClient {
     }
   }
 
-  async markProposalBroadcast(id: string, broadcasterPkh: string): Promise<any> {
+  async markProposalBroadcast(id: string, broadcasterPkh: string, finalTxId?: string): Promise<any> {
     try {
       const response = await this.client.post(`/api/proposals/${id}/broadcast`, {
         broadcaster_pkh: broadcasterPkh,
+        final_tx_id: finalTxId,
       });
       return response.data;
     } catch (error) {

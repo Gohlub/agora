@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useWalletStore } from '../store/wallet';
 import { NockchainProvider } from '@nockbox/iris-sdk';
 import walletIcon from '../assets/wallet-icon.svg'; // or .png, .jpg, etc.
 
 export default function WalletConnectButton() {
   const { pkh, setWallet, clearWallet } = useWalletStore();
+  const navigate = useNavigate();
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isHovered, setIsHovered] = useState(false);
@@ -43,6 +45,7 @@ export default function WalletConnectButton() {
 
   const handleDisconnect = () => {
     clearWallet();
+    navigate('/');
   };
 
   if (pkh) {

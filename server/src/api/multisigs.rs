@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    routing::{get, post},
+    routing::{post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,6 @@ struct MultisigResponse {
 pub fn router() -> Router<DbPool> {
     Router::new()
         .route("/", post(create_multisig).get(list_multisigs))
-        .route("/:lock_root_hash", get(get_multisig))
 }
 
 async fn create_multisig(
@@ -148,37 +147,5 @@ async fn list_multisigs(
     }).collect();
     
     Ok(Json(response))
-}
-
-async fn get_multisig(
-    State(pool): State<DbPool>,
-    axum::extract::Path(lock_root_hash): axum::extract::Path<String>,
-) -> Result<Json<MultisigResponse>, AppError> {
-    let lock: Lock = sqlx::query_as::<_, Lock>(
-        "SELECT lock_root_hash, threshold, total_signers, created_at, created_by_pkh FROM locks WHERE lock_root_hash = ?"
-    )
-    .bind(&lock_root_hash)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("Multisig {} not found", lock_root_hash)))?;
-    
-    // Get participants
-    let participants: Vec<LockParticipant> = sqlx::query_as::<_, LockParticipant>(
-        "SELECT lock_root_hash, pkh FROM lock_participants WHERE lock_root_hash = ?"
-    )
-    .bind(&lock.lock_root_hash)
-    .fetch_all(&pool)
-    .await?;
-    
-    let pkhs: Vec<String> = participants.into_iter().map(|p| p.pkh).collect();
-    
-    Ok(Json(MultisigResponse {
-        lock_root_hash: lock.lock_root_hash,
-        threshold: lock.threshold,
-        total_signers: lock.total_signers,
-        created_at: lock.created_at,
-        created_by_pkh: lock.created_by_pkh,
-        participants: pkhs,
-    }))
 }
 

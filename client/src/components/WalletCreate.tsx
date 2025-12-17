@@ -2,8 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useWalletStore } from '../store/wallet';
-import * as wasm from '../wasm';
-import { useWasmCleanup } from '../utils/wasm-cleanup';
+import { useWasmCleanup, computeLockRootHash } from '../utils/wasm-utils';
 
 export default function WalletCreate() {
   const [threshold, setThreshold] = useState(2);
@@ -92,14 +91,9 @@ export default function WalletCreate() {
         throw new Error('Wallet not connected');
       }
       
-      await wasm.default();
+      console.log('Creating multisig with participants:', validPkhs);
       
-      console.log(validPkhs)
-      const multisigPkh = new wasm.Pkh(BigInt(threshold), validPkhs); // don't register because parent will be freed anyways
-      const lockPrimitive = wasm.LockPrimitive.newPkh(multisigPkh); // same here
-      const spendCondition = wasmCleanup.register(new wasm.SpendCondition([lockPrimitive]));
-      const firstName = wasmCleanup.register(spendCondition.firstName());
-      const lockRootHash = firstName.value;
+      const lockRootHash = await computeLockRootHash(threshold, validPkhs, wasmCleanup);
       
       // create multisig spending condition
       await apiClient.createMultisig(
