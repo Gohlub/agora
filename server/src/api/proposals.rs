@@ -104,7 +104,7 @@ pub struct SignProposalResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct BroadcastProposalRequest {
-    pub broadcaster_pkh: String,
+    pub _broadcaster_pkh: String,
     /// The final transaction ID after merging signatures (may differ from original proposal tx_id)
     pub final_tx_id: Option<String>,
 }
