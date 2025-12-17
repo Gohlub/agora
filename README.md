@@ -63,23 +63,18 @@ agora/
 - **Iris Wallet intergration**: Clients can use their Iris wallet to sign transactions
 - **M-of-N Multisig**: Create wallets requiring multiple signatures
 - **Transaction Proposals**: Propose transactions for group approval
-- **Parallel Signing**: Signers can sign independently, signatures are merged at broadcast 
 - **Direct Spend**: 1-of-n wallets can send directly without the proposal flow
-- **Transaction History**: Track all wallet transactions
+- **Transaction History**: Track all multisig wallet transactions
 - **Note Consolidation**: Consolidate Notes associated with a multisig
 
-## Supported Seed Destinations
+# Architecture and Flow
+Clients initiate multisig wallets by first creating an m-of-n spend condition, which is shared with the coordination server. Whenever a new client connects, the server checks whether the connected wallet PKH matches any existing spend condition, and on a match, shares the configuration across clients. Each client has the option to fund the multisig, and only after a valid note for the multisig is available (through client pooling), can the clients propose transactions. Similarly to the spend conditions, the transaction proposals are also coordinated by the server, and each 'signer' can independently sign the proposal (through their Iris Wallet instance). Signatures are pooled and shared with the clients, and once the m-of-n threshold is met, any client can broadcast the transaction.
 
+## Supported Seed Destinations
 When spending from a multisig, you can send to two types of destinations:
 
-| Destination | Description | Use Case |
-|-------------|-------------|----------|
-| **`PKH`** | A PKH (public key hash). The lock root is derived via `firstName()`. | Send to someone's personal 'wallet' |
-| **Lock Root** | A lock root hash used directly | Send to another multisig, consolidate notes, or any custom SpendCondition |
+| Destination | Description 
+|-------------|-------------
+| **`PKH`** | A PKH (public key hash). The lock root is derived via `firstName()`. 
+| **Lock Root** | A lock root hash used directly | 
 
-### How It Works
-
-In Nockchain's UTXO model, every note has a `name = [lock-root, source]`. The lock-root determines who can spend the note.
-
-- **Wallet Address**: We build a simple PKH SpendCondition and compute `firstName()` = `hash(true, hash(SpendCondition))`. This matches how wallets query for notes.
-- **Lock Root**: Used as-is. Useful for sending to multisigs (whose lock root you know) or consolidating notes back to this wallet.
