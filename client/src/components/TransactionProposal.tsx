@@ -274,7 +274,6 @@ export default function TransactionProposal({
 
         setTxStatus('Confirming acceptance...');
         
-        // Try both possible transaction IDs
         try {
           await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), actualTxId, {
             intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
@@ -561,21 +560,29 @@ export default function TransactionProposal({
                       fontSize: '0.875rem',
                     }}
                   />
-                  <input
-                    type="number"
-                    value={seed.amountNock || ''}
-                    onChange={(e) => updateSeed(seed.id, 'amountNock', parseFloat(e.target.value) || 0)}
-                    placeholder="NOCK"
-                    min="0"
-                    step="0.0001"
-                    style={{
-                      width: '90px',
-                      padding: '0.5rem',
-                      border: '1px solid #ced4da',
-                      borderRadius: '4px',
-                      fontSize: '0.875rem',
-                    }}
-                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={seed.amountNock || ''}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value === '' || /^\d*\.?\d*$/.test(value)) {
+                          updateSeed(seed.id, 'amountNock', value === '' ? 0 : parseFloat(value) || 0);
+                        }
+                      }}
+                      placeholder="0"
+                      style={{
+                        padding: '0.25rem 0.5rem',
+                        border: '1px solid #ddd',
+                        borderRadius: '4px',
+                        width: '60px',
+                        textAlign: 'left',
+                        fontSize: '0.875rem',
+                      }}
+                    />
+                    <span style={{ color: '#666', fontSize: '0.875rem' }}>NOCK</span>
+                  </div>
                   {seeds.length > 1 && (
                     <button
                       onClick={() => removeSeed(seed.id)}
