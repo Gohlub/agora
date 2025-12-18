@@ -82,7 +82,7 @@ agora/
 Clients initiate multisig wallets by first creating an m-of-n spend condition, which is shared with the coordination server. Whenever a new client connects, the server checks whether the connected wallet PKH matches any existing spend condition, and on a match, shares the configuration across clients. Each client has the option to fund the multisig, and only after a valid note for the multisig is available (clients pool for notes associated with the multisig), can the clients propose transactions. Similarly to the spend conditions, the transaction proposals are also coordinated by the server, and each 'signer' can independently sign the proposal (through their Iris Wallet instance). Signatures are pooled and shared with the clients, and once the m-of-n threshold is met, any client can broadcast the transaction.
 
 # Considerations
-Transaction building and coordination logic have not audited and there are no privacy and security guarantees.
+Transaction building and coordination logic have not been audited and there are no privacy and security guarantees.
 
 ## Supported Seed Destinations
 When spending from a multisig, you can send to two types of destinations:
