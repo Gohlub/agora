@@ -10,6 +10,7 @@ import {
   buildUnsignedMultisigFundingTx,
   ensureWasmInitialized 
 } from '../utils/wasm-utils';
+import * as wasm from '../wasm';
 import TransactionProposal from './TransactionProposal';
 import PendingProposals from './PendingProposals';
 import TransactionHistory from './TransactionHistory';
@@ -171,30 +172,31 @@ export default function WalletList() {
         spendConditions: unsignedTx.spendConditionsProtobufs,
       });
       
-      // Extract the transaction ID from the signed transaction
-      const idField = (signedTxBytes as any).id;
-      const signedTxId = typeof idField === 'string' ? idField : idField?.value;
+      // Recalculate the correct transaction ID after signing
+      const rawTx = wasmCleanup.register(wasm.RawTx.fromProtobuf(signedTxBytes));
+      const correctTxId = rawTx.recalcId().value;
+      console.log('[Funding] Using correct transaction ID:', correctTxId);
       
       // Broadcast the transaction
       setFundingStatus('Broadcasting transaction...');
       const grpcClient = await getGrpcClient(grpcEndpoint);
       await grpcClient.sendTransaction(signedTxBytes);
 
-      // Check acceptance
+      // Check acceptance using the correct ID
       setFundingStatus('Confirming transaction...');
       await new Promise(resolve => setTimeout(resolve, 2000));
       
       let accepted = false;
       for (let i = 0; i < 3; i++) {
-        accepted = await grpcClient.transactionAccepted(signedTxId);
+        accepted = await grpcClient.transactionAccepted(correctTxId);
         if (accepted) break;
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
       if (accepted) {
-        setFundingStatus(`Transaction confirmed! ID: ${signedTxId.substring(0, 16)}...`);
+        setFundingStatus(`Transaction confirmed! ID: ${correctTxId.substring(0, 16)}...`);
       } else {
-        setFundingStatus(`Transaction broadcast! ID: ${signedTxId.substring(0, 16)}... (confirming...)`);
+        setFundingStatus(`Transaction broadcast! ID: ${correctTxId.substring(0, 16)}... (confirming...)`);
       }
       
 

@@ -1057,7 +1057,7 @@ export async function validateSignedTransaction(params: {
     const rawTx = wasm.RawTx.fromProtobuf(signedTxProtobuf);
     if (cleanup) cleanup.register(rawTx);
 
-    const signedTxId = rawTx.id.value;
+    // Note: rawTx.id.value might be stale after signature merging, so we recalculate below
 
     const notes = notesProtobufs.map((proto) => {
       const note = wasm.Note.fromProtobuf(proto);
@@ -1090,7 +1090,10 @@ export async function validateSignedTransaction(params: {
     // Validate the transaction
     builder.validate();
 
-    return { valid: true, signedTxId };
+    // Recalculate the transaction ID to ensure it's correct
+    const correctTxId = rawTx.recalcId().value;
+
+    return { valid: true, signedTxId: correctTxId };
   } catch (err: any) {
     const errorMsg = err?.message || err?.toString() || String(err);
     console.error('=== Transaction Validation: FAILED ===');

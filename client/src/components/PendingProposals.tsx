@@ -191,13 +191,9 @@ export default function PendingProposals() {
       setStatusMessage('Loading proposal and signatures...');
 
       // Get full proposal details with all collected signatures
-      console.log('[Broadcast] Loading proposal:', proposalId);
+     
       const proposal: ProposalDetail = await apiClient.getProposal(proposalId);
-      console.log('[Broadcast] Proposal loaded:', {
-        threshold: proposal.threshold,
-        signaturesCount: proposal.signatures.length,
-        signers: proposal.signers,
-      });
+
       
       if (proposal.signatures.length < proposal.threshold) {
         setError(`Not enough signatures: ${proposal.signatures.length}/${proposal.threshold}`);
@@ -214,17 +210,14 @@ export default function PendingProposals() {
       let baseId: string | null = null;
       
       for (const sig of proposal.signatures) {
-        console.log('[Broadcast] Parsing signature from:', sig.signer_pkh.slice(0, 12));
         const parsed = JSON.parse(sig.signed_tx_json);
         const parsedId = parsed.id?.value || parsed.id;
         
         if (baseId === null) {
           // First signer - use their ID as the base
           baseId = parsedId;
-          console.log(`[Broadcast] Using base ID from first signer: ${baseId?.slice(0, 16)}...`);
         } else if (parsedId !== baseId) {
           // Subsequent signers - normalize to base ID
-          console.log(`[Broadcast] Normalizing ID from ${parsedId?.slice(0, 16)}... to ${baseId?.slice(0, 16)}...`);
           if (parsed.id?.value) {
             parsed.id.value = baseId;
           } else {
@@ -234,9 +227,7 @@ export default function PendingProposals() {
         
         signedTxProtobufs.push(parsed);
       }
-      
-      console.log('[Broadcast] Merging', signedTxProtobufs.length, 'signatures with threshold', proposal.threshold);
-      
+            
       // For m-of-n multisig, we need to merge signatures from all signers.
       // Each signed tx contains one signer's signature in the witness.
       // Use mergeSignatures to combine signatures into one tx.
@@ -246,31 +237,15 @@ export default function PendingProposals() {
         mergedRawTx = wasmCleanup.register(
           wasm.RawTx.mergeSignatures(signedTxProtobufs, proposal.threshold)
         );
-        console.log('[Broadcast] Signatures merged successfully');
       } catch (mergeErr: any) {
-        console.error('[Broadcast] Merge failed:', mergeErr);
         throw new Error(`Failed to merge signatures: ${mergeErr?.message || mergeErr}`);
       }
       
-      // CRITICAL: Recalculate the transaction ID after merging signatures.
-      // The merge uses the first signer's ID, but the network computes ID from (version, spends)
-      // which now has combined signatures - a different hash!
-      const recalculatedId = mergedRawTx.recalcId();
-      const correctTxId = recalculatedId.value;
-      console.log('[Broadcast] Recalculated TX ID:', correctTxId.slice(0, 16));
-      console.log('[Broadcast] Previous base ID was:', baseId?.slice(0, 16));
+      // The mergeSignatures function now correctly recalculates the transaction ID
+      const correctTxId = mergedRawTx.id.value;
       
-      // Get the protobuf and update the ID to the correct one
+      // Get the protobuf for broadcasting
       const finalSignedTx = mergedRawTx.toProtobuf();
-      const oldId = finalSignedTx.id?.value || finalSignedTx.id;
-      
-      // Update the ID in the protobuf to match the recalculated ID
-      if (finalSignedTx.id?.value) {
-        finalSignedTx.id.value = correctTxId;
-      } else {
-        finalSignedTx.id = correctTxId;
-      }
-      console.log('[Broadcast] Updated TX ID from', oldId.slice(0, 16), 'to', correctTxId.slice(0, 16));
       
       // Validate the merged transaction before broadcasting
       setStatusMessage('Validating merged transaction...');
@@ -288,64 +263,32 @@ export default function PendingProposals() {
         console.error('[Broadcast] Validation failed:', validation.error);
         throw new Error(`Transaction validation failed: ${validation.error}`);
       }
-      console.log('[Broadcast] Validation passed');
       
       // Send the transaction
       setStatusMessage('Broadcasting transaction...');
-      console.log('[Broadcast] Sending to', grpcEndpoint);
       const grpcClient = await getGrpcClient(grpcEndpoint);
       
       try {
         await grpcClient.sendTransaction(finalSignedTx);
-        console.log('[Broadcast] Transaction sent successfully');
       } catch (sendErr: any) {
-        console.error('[Broadcast] Send failed:', sendErr);
         throw new Error(`Failed to send transaction: ${sendErr?.message || sendErr}`);
       }
       
-      // Check acceptance using the recalculated ID (this should be the correct one)
+      // Check acceptance using the recalculated ID (this is the correct one)
       setStatusMessage('Checking acceptance...');
-      console.log('[Broadcast] Checking acceptance for TX:', correctTxId.slice(0, 16));
       
-      let accepted = false;
       try {
         await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), correctTxId, {
           intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
-          maxAttempts: 5,
+          maxAttempts: 10, // Increased attempts since this should be the correct ID
         });
-        console.log('[Broadcast] Transaction accepted!');
-        accepted = true;
       } catch (e) {
-        console.warn('[Broadcast] Primary ID not accepted, trying fallbacks...');
-        
-        // Try other possible IDs as fallback
-        const fallbackIds = [baseId, proposal.tx_id].filter(
-          (id): id is string => !!id && id !== correctTxId
-        );
-        
-        for (const txId of fallbackIds) {
-          console.log('[Broadcast] Trying fallback ID:', txId.slice(0, 16));
-          try {
-            await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), txId, {
-              intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
-              maxAttempts: 2,
-            });
-            console.log('[Broadcast] Transaction accepted with fallback ID:', txId.slice(0, 16));
-            accepted = true;
-            break;
-          } catch {
-            console.log('[Broadcast] Fallback ID not accepted:', txId.slice(0, 16));
-          }
-        }
+        console.warn('[Broadcast] Transaction not immediately accepted. May still be processing.');
+        // Don't fail the broadcast - the transaction was sent successfully
       }
       
-      if (!accepted) {
-        console.warn('[Broadcast] Transaction not accepted with any known ID. Check block explorer manually.');
-      }
-      
-      // Mark as broadcast on backend with the CORRECT tx_id (after merging signatures)
+      // Always store and display the recalculated ID - this is the correct one
       await apiClient.markProposalBroadcast(proposalId, pkh, correctTxId);
-      console.log('[Broadcast] Recorded final TX ID:', correctTxId);
       
       setStatusMessage(`Transaction broadcast! ID: ${correctTxId.substring(0, 16)}...`);
       
