@@ -13,7 +13,6 @@ import {
 import { 
   checkTransactionAcceptance,
   ACCEPTANCE_CHECK_INTERVAL_MS,
-  ACCEPTANCE_CHECK_MAX_ATTEMPTS,
 } from '../utils/tx-lifecycle';
 import type { WalletNote } from './WalletList';
 
@@ -207,7 +206,6 @@ export default function TransactionProposal({
       }));
 
       // Build the unsigned transaction using the utility function
-      // This properly handles WASM object ownership
       const unsignedTx = await buildUnsignedMultisigSpendTx({
         threshold,
         participants,
@@ -283,19 +281,11 @@ export default function TransactionProposal({
             maxAttempts: 5,
           });
         } catch (e1) {
-          // Try the original ID as fallback
-          try {
-            await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), txId, {
-              intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
-              maxAttempts: ACCEPTANCE_CHECK_MAX_ATTEMPTS,
-            });
-          } catch (e2) {
             throw new Error(
               'Transaction was not accepted. The note may have already been spent. ' +
               'Please refresh the wallet and try again.'
             );
           }
-        }
 
         setTxStatus('Recording transaction...');
         await apiClient.directSpend({
