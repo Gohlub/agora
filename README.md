@@ -28,20 +28,9 @@ This script will:
 - Copy the output to `client/src/wasm/`
 - Clean up the cloned repository
 
-#### Note:
-Make sure to properly set up environment variables:
-```bash
-cp .env.example .env
-```
-For development, set:
-```bash
-DATABASE_URL=sqlite:./data/data.db
-API_PORT=3000
-CORS_ORIGIN=http://localhost:5173
-```
 ### 2. Start the API Server
 
-**Note:** Environment variables are configured in `docker-compose.yml` by default. To customize them, create a `.env` file in the `server/` directory or modify `docker-compose.yml`.
+ Note: Environment variables are configured in `docker-compose.yml` by default. To customize them, create a `.env` file in the `server/` directory or modify `docker-compose.yml`.
 
 ```bash
 cd server
