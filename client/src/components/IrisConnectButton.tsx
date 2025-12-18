@@ -8,7 +8,7 @@ export default function WalletConnectButton() {
   const { pkh, setWallet, clearWallet } = useWalletStore();
   const navigate = useNavigate();
   const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [_error, setError] = useState<string | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [isDisconnectHovered, setIsDisconnectHovered] = useState(false);
 
