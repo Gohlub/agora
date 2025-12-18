@@ -533,6 +533,14 @@ export async function buildUnsignedMultisigSpendTx(params: {
     // Create FRESH spend conditions for each SpendBuilder call
     const inputSpendCondition = await buildMultisigSpendCondition(threshold, participants, cleanup);
     const refundSpendCondition = await buildMultisigSpendCondition(threshold, participants, cleanup);
+    
+    // Get refund spend condition hash BEFORE it gets consumed by SpendBuilder
+    const refundSpendConditionHash = refundSpendCondition.hash();
+    if (!refundSpendConditionHash) {
+      throw new Error('Failed to get refund spend condition hash');
+    }
+    
+    console.log(`[REFUND DEBUG] Note ${i}: Refund spend condition hash: ${refundSpendConditionHash.value}`);
 
     // Create SpendBuilder - note, inputSpendCondition, and refundSpendCondition are all consumed
     const spendBuilder = new wasm.SpendBuilder(
@@ -609,12 +617,63 @@ export async function buildUnsignedMultisigSpendTx(params: {
       }
     }
 
-    // Use computeRefund to create refund seed (uses wrong lock root internally, but we'll fix it after building)
-    spendBuilder.computeRefund(false);
+    // Create refund seed manually to ensure consistent hash computation with user seeds
+    const noteAssets = Number(noteInfo.assets);
+    let spentAssets = 0;
+    
+    // Only the first note (i === 0) has all the seeds added to it
+    if (i === 0) {
+      spentAssets = validSeeds.reduce((sum, seed) => sum + Math.floor(seed.amountNock * 65536), 0);
+    }
+    
+    const refundAmount = noteAssets - spentAssets;
+    
+    if (refundAmount > 0) {
+      // Use the pre-captured refund spend condition hash (refundSpendCondition was consumed by SpendBuilder)
+      console.log(`[REFUND DEBUG] Note ${i}: Creating refund seed with hash: ${refundSpendConditionHash.value}`);
+      console.log(`[REFUND DEBUG] Note ${i}: Refund amount: ${refundAmount}`);
+      
+      // Create refund LockRoot using fromHash (same as user seeds) for consistent behavior
+      const refundHashDigest = new wasm.Digest(refundSpendConditionHash.value);
+      const refundLockRoot = wasm.LockRoot.fromHash(refundHashDigest);
+      if (cleanup) {
+        cleanup.register(refundLockRoot);
+        cleanup.register(refundSpendConditionHash);
+        cleanup.register(refundHashDigest);
+      }
+      
+      // Create fresh parent hash for refund seed
+      if (!parentHashValue) {
+        throw new Error('Parent hash value required for refund seed');
+      }
+      const refundParentHash = new wasm.Digest(parentHashValue);
+      if (cleanup) {
+        cleanup.register(refundParentHash);
+      }
+      
+      const refundNoteData = wasm.NoteData.empty();
+      if (cleanup) {
+        cleanup.register(refundNoteData);
+      }
+      
+      const refundSeed = new wasm.Seed(
+        null, // output_source
+        refundLockRoot,
+        BigInt(refundAmount),
+        refundNoteData,
+        refundParentHash
+      );
+      
+      if (cleanup) {
+        cleanup.register(refundSeed);
+      }
+      
+      spendBuilder.seed(refundSeed);
+    }
 
     // Verify spend is balanced before adding to builder (like funding flow does)
     if (!spendBuilder.isBalanced()) {
-      throw new Error(`SpendBuilder ${i} is not balanced after computeRefund`);
+      throw new Error(`SpendBuilder ${i} is not balanced after adding refund seed`);
     }
 
     // Add spend to transaction builder
