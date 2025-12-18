@@ -127,10 +127,6 @@ export function useWasmCleanup() {
   return managerRef.current;
 }
 
-// ============================================================
-// Multisig SpendCondition Utilities
-// ============================================================
-
 /**
  * Build a multisig SpendCondition from threshold and participant PKHs.
  * 
@@ -282,17 +278,6 @@ export async function createWasmNotesFromBalance(
   }
   
   const wasmNotes = balance.notes.map((entry: any, index: number) => {
-    // Log entry structure for debugging
-    if (index === 0) {
-      console.log('First balance entry structure:', {
-        keys: Object.keys(entry),
-        hasNote: !!entry.note,
-        noteType: typeof entry.note,
-        noteKeys: entry.note ? Object.keys(entry.note) : null,
-        name: entry.name,
-        noteDataHash: entry.note_data_hash
-      });
-    }
     
     if (!entry.note) {
       throw new Error(`Balance entry at index ${index} missing note protobuf`);
@@ -316,17 +301,10 @@ export async function createWasmNotesFromBalance(
         }
       } catch (err: any) {
         const errorMsg = err?.message || err?.toString() || String(err);
-        console.error(`Note at index ${index} is invalid immediately after creation:`, errorMsg);
         throw new Error(`Note created but not usable: ${errorMsg}`);
       }
     } catch (err: any) {
       const errorMsg = err?.message || err?.toString() || String(err);
-      console.error(`Error creating note from protobuf at index ${index}:`, errorMsg);
-      console.error('Entry structure:', {
-        keys: Object.keys(entry),
-        noteType: typeof entry.note,
-        noteStructure: entry.note ? Object.keys(entry.note) : null
-      });
       throw new Error(`Failed to create note from protobuf at index ${index}: ${errorMsg}`);
     }
     
@@ -398,6 +376,15 @@ export interface MultisigNoteInput {
   nameFirst?: string;
 }
 
+
+export interface NoteWithProto {
+  protoNote: any;
+  assets: number;
+  originPage: number;
+  nameFirst: string;
+  nameLast?: string;
+}
+
 /**
  * Destination type for a transaction seed.
  * - 'wallet': A wallet address (PKH) - we derive the lock root via firstName()
@@ -458,12 +445,16 @@ export async function buildUnsignedMultisigSpendTx(params: {
   seeds: TransactionSeed[];
   cleanup?: WasmResourceManager;
 }): Promise<UnsignedTransaction> {
-  console.log('[buildUnsignedMultisigSpendTx] Starting...');
-  await ensureWasmInitialized();
-  console.log('[buildUnsignedMultisigSpendTx] WASM initialized');
 
-  const { threshold, participants, selectedNotes, seeds, cleanup } = params;
-  console.log(`[buildUnsignedMultisigSpendTx] Config: ${threshold}-of-${participants.length}, ${selectedNotes.length} notes, ${seeds.length} seeds`);
+  await ensureWasmInitialized();
+
+  const {
+     threshold,
+     participants,
+     selectedNotes,
+     seeds,
+     cleanup
+  } = params;
 
   if (selectedNotes.length === 0) {
     throw new Error('No notes selected for spending');
@@ -484,8 +475,6 @@ export async function buildUnsignedMultisigSpendTx(params: {
   const totalInputNicks = selectedNotes.reduce((sum, n) => sum + n.assets, 0);
   const totalOutputNicks = validSeeds.reduce((sum, s) => sum + Math.floor(s.amountNock * 65536), 0);
   
-  console.log(`[buildUnsignedMultisigSpendTx] Total input: ${(totalInputNicks / 65536).toFixed(4)} NOCK (${totalInputNicks} nicks)`);
-  console.log(`[buildUnsignedMultisigSpendTx] Total output: ${(totalOutputNicks / 65536).toFixed(4)} NOCK (${totalOutputNicks} nicks)`);
   
   // Conservative fee estimate for multisig: ~50 NOCK for 2-of-3, scales with participants
   // Multisig signatures are larger than single-sig
@@ -493,7 +482,7 @@ export async function buildUnsignedMultisigSpendTx(params: {
     32768 * (10 + participants.length * 15 + selectedNotes.length * 5), // word-based estimate
     65536 * 20 // minimum 20 NOCK for multisig
   );
-  console.log(`[buildUnsignedMultisigSpendTx] Estimated fee: ${(estimatedFeeNicks / 65536).toFixed(4)} NOCK`);
+
   
   // Validate we have enough funds
   if (totalInputNicks < totalOutputNicks + estimatedFeeNicks) {
@@ -507,21 +496,16 @@ export async function buildUnsignedMultisigSpendTx(params: {
   }
 
   // Verify the multisig spend condition matches the notes' lock root
-  console.log('[buildUnsignedMultisigSpendTx] Building verify spend condition...');
   const verifySpendCondition = await buildMultisigSpendCondition(threshold, participants);
-  console.log('[buildUnsignedMultisigSpendTx] Getting expectedLockRoot...');
   const firstNameDigestVerify = verifySpendCondition.firstName();
   const expectedLockRoot = firstNameDigestVerify.value;
-  console.log(`[buildUnsignedMultisigSpendTx] Expected lock root: ${expectedLockRoot.slice(0, 16)}...`);
   
   // Verify all notes have the expected lock root
   for (let i = 0; i < selectedNotes.length; i++) {
     const noteInfo = selectedNotes[i];
-    console.log(`[buildUnsignedMultisigSpendTx] Note ${i} nameFirst: ${noteInfo.nameFirst?.slice(0, 16) || 'undefined'}...`);
     if (noteInfo.nameFirst && noteInfo.nameFirst !== expectedLockRoot) {
       throw new Error(
-        `Spend condition mismatch for note ${i}. ` +
-        `The participants may be in a different order than when the wallet was created.`
+        `Spend condition mismatch for note ${i}.`
       );
     }
   }
@@ -530,67 +514,91 @@ export async function buildUnsignedMultisigSpendTx(params: {
   try { firstNameDigestVerify.free(); } catch (e) { /* ignore */ }
   try { verifySpendCondition.free(); } catch (e) { /* ignore */ }
 
+  // Keep notes as JavaScript objects with protoNote
+  const notesWithProto: NoteWithProto[] = selectedNotes.map((noteInfo) => {
+    if (!noteInfo.protoNote) {
+      throw new Error('Note missing protoNote - cannot build transaction');
+    }
+    
+    // Extract assets and originPage from protobuf (handle both V1 and legacy formats)
+    const noteVersion = noteInfo.protoNote.note_version;
+    const noteData = noteVersion?.V1 || noteInfo.protoNote.v1;
+    const assetsValue = noteData?.assets?.value || '0';
+    const assets = Number(assetsValue);
+    const originPageValue = noteData?.origin_page?.value || '0';
+    const originPage = Number(originPageValue);
+    
+    // nameFirst is required for spend condition verification
+    const nameFirst = noteInfo.nameFirst;
+    if (!nameFirst) {
+      throw new Error('Note missing nameFirst (lock root) - cannot determine spend condition');
+    }
+    
+    return {
+      protoNote: noteInfo.protoNote,
+      assets,
+      originPage,
+      nameFirst,
+      nameLast: undefined, // Not needed for multisig spend
+    };
+  });
+
   // Create transaction builder
-  console.log('[buildUnsignedMultisigSpendTx] Creating TxBuilder...');
   const builder = new wasm.TxBuilder(feePerWord);
   if (cleanup) {
     cleanup.register(builder);
   }
-  console.log('[buildUnsignedMultisigSpendTx] TxBuilder created');
+
+  // Get parent hash value for first note BEFORE creating SpendBuilder
+  let parentHashValue: string | null = null;
+  if (notesWithProto.length > 0 && validSeeds.length > 0) {
+    const firstNoteProto = notesWithProto[0].protoNote;
+    
+    // Create a temporary note just to get the hash
+    const tempNote = wasm.Note.fromProtobuf(firstNoteProto);
+    try {
+      const tempHash = tempNote.hash();
+      if (!tempHash) {
+        throw new Error('Note.hash() returned null');
+      }
+      parentHashValue = tempHash.value;
+      try { tempHash.free(); } catch (e) { /* ignore */ }
+    } catch (err: any) {
+      const errorMsg = err?.message || err?.toString() || String(err);
+      throw new Error(`Failed to get hash for first note: ${errorMsg}`);
+    } finally {
+      try { tempNote.free(); } catch (e) { /* ignore */ }
+    }
+  }
 
   // Process each selected note
-  // IMPORTANT: WASM objects are consumed when passed to constructors,
-  // so we must create FRESH instances for each parameter
-  for (let i = 0; i < selectedNotes.length; i++) {
-    console.log(`[buildUnsignedMultisigSpendTx] Processing note ${i}...`);
-    const noteInfo = selectedNotes[i];
+  for (let i = 0; i < notesWithProto.length; i++) {
+    const noteInfo = notesWithProto[i];
 
     // Create FRESH WASM Note from protobuf for SpendBuilder
-    console.log(`[buildUnsignedMultisigSpendTx] Creating Note from protobuf...`);
     const note = wasm.Note.fromProtobuf(noteInfo.protoNote);
-    console.log(`[buildUnsignedMultisigSpendTx] Note created, registering with cleanup...`);
     if (cleanup) {
       cleanup.register(note);
     }
 
-    // Get parent hash value BEFORE passing note to SpendBuilder (note will be consumed)
-    // We store the hash VALUE (string) so we can create fresh Digest objects for each seed
-    // (WASM objects are consumed when passed to constructors)
-    let parentHashValue: string | null = null;
-    if (i === 0 && validSeeds.length > 0) {
-      console.log(`[buildUnsignedMultisigSpendTx] Getting note hash for parentHashValue...`);
-      const tempHash = note.hash();
-      parentHashValue = tempHash.value;
-      console.log(`[buildUnsignedMultisigSpendTx] parentHashValue: ${parentHashValue.slice(0, 16)}...`);
-      try { tempHash.free(); } catch (e) { /* ignore */ }
-    }
-
     // Create FRESH spend conditions for each SpendBuilder call
-    // (WASM objects are consumed when passed to SpendBuilder)
-    console.log(`[buildUnsignedMultisigSpendTx] Building inputSpendCondition...`);
     const inputSpendCondition = await buildMultisigSpendCondition(threshold, participants, cleanup);
-    console.log(`[buildUnsignedMultisigSpendTx] Building refundSpendCondition...`);
     const refundSpendCondition = await buildMultisigSpendCondition(threshold, participants, cleanup);
-    console.log(`[buildUnsignedMultisigSpendTx] Both spend conditions built`);
 
     // Create SpendBuilder - note, inputSpendCondition, and refundSpendCondition are all consumed
-    console.log(`[buildUnsignedMultisigSpendTx] Creating SpendBuilder...`);
     const spendBuilder = new wasm.SpendBuilder(
       note,
       inputSpendCondition,
       refundSpendCondition
     );
-    console.log(`[buildUnsignedMultisigSpendTx] SpendBuilder created`);
     if (cleanup) {
       cleanup.register(spendBuilder);
     }
 
     // For the first note, add all seeds (outputs)
     if (i === 0 && parentHashValue) {
-      console.log(`[buildUnsignedMultisigSpendTx] Adding ${validSeeds.length} seeds...`);
       for (let seedIdx = 0; seedIdx < validSeeds.length; seedIdx++) {
         const seedData = validSeeds[seedIdx];
-        console.log(`[buildUnsignedMultisigSpendTx] Seed ${seedIdx}: ${seedData.amountNock} NOCK to ${seedData.destinationType}:${seedData.destination.slice(0, 12)}...`);
         
         const giftNicks = BigInt(Math.floor(seedData.amountNock * 65536));
         const destination = seedData.destination.trim();
@@ -599,28 +607,19 @@ export async function buildUnsignedMultisigSpendTx(params: {
         
         if (seedData.destinationType === 'lockroot') {
           // Direct lock root hash - use as-is
-          console.log(`[buildUnsignedMultisigSpendTx] Creating Digest for lock root...`);
           const digest = new wasm.Digest(destination);
-          console.log(`[buildUnsignedMultisigSpendTx] Creating LockRoot from hash...`);
           recipientLockRoot = wasm.LockRoot.fromHash(digest);
           if (cleanup) {
             cleanup.register(digest);
           }
-          console.log(`  → ${seedData.amountNock.toFixed(4)} NOCK to lock root ${destination.slice(0, 12)}...`);
         } else {
           // Wallet address (PKH) - derive lock root using firstName()
-          // firstName() = hash(true, hash(SpendCondition)) - this is what wallets query for
-          console.log(`[buildUnsignedMultisigSpendTx] Building recipient SpendCondition for PKH...`);
+          // firstName() = hash(true, hash(SpendCondition)) 
           const recipientSpendCondition = await buildSimplePkhSpendCondition(destination, cleanup);
-          console.log(`[buildUnsignedMultisigSpendTx] Getting firstName from recipient SpendCondition...`);
           const firstNameDigest = recipientSpendCondition.firstName();
           
           // Get the value BEFORE passing to fromHash (digest may be consumed)
           const lockRootHash = firstNameDigest.value;
-          console.log(`[buildUnsignedMultisigSpendTx] firstName value: ${lockRootHash.slice(0, 16)}...`);
-          
-          console.log(`[buildUnsignedMultisigSpendTx] Creating LockRoot from firstName...`);
-          // Create a fresh digest for LockRoot.fromHash since we already extracted the value
           const lockRootDigest = new wasm.Digest(lockRootHash);
           if (cleanup) {
             cleanup.register(lockRootDigest);
@@ -629,8 +628,6 @@ export async function buildUnsignedMultisigSpendTx(params: {
           
           // Free the original firstName digest since we no longer need it
           try { firstNameDigest.free(); } catch (e) { /* ignore */ }
-          
-          console.log(`  → ${seedData.amountNock.toFixed(4)} NOCK to wallet ${destination.slice(0, 12)}... → lock root: ${lockRootHash.slice(0, 12)}...`);
         }
         
         if (cleanup) {
@@ -638,19 +635,16 @@ export async function buildUnsignedMultisigSpendTx(params: {
         }
 
         // Create FRESH Digest for parentHash - each Seed consumes its parentHash argument
-        console.log(`[buildUnsignedMultisigSpendTx] Creating parentHashDigest...`);
         const parentHashDigest = new wasm.Digest(parentHashValue);
         if (cleanup) {
           cleanup.register(parentHashDigest);
         }
 
-        console.log(`[buildUnsignedMultisigSpendTx] Creating NoteData.empty()...`);
         const noteData = wasm.NoteData.empty();
         if (cleanup) {
           cleanup.register(noteData);
         }
 
-        console.log(`[buildUnsignedMultisigSpendTx] Creating Seed...`);
         const seed = new wasm.Seed(
           null, // output_source
           recipientLockRoot,
@@ -658,57 +652,33 @@ export async function buildUnsignedMultisigSpendTx(params: {
           noteData,
           parentHashDigest // Fresh digest for each seed (WASM object is consumed)
         );
-        console.log(`[buildUnsignedMultisigSpendTx] Seed created`);
         
         // Verify the seed has the correct lock root
-        const seedLockRootHash = seed.lockRoot.hash.value;
-        console.log(`[buildUnsignedMultisigSpendTx] VERIFY: Seed lock_root.hash = ${seedLockRootHash}`);
-        console.log(`[buildUnsignedMultisigSpendTx] VERIFY: Expected firstName = ${seedData.destinationType === 'wallet' ? 'derived from PKH' : destination}`);
         
         if (cleanup) {
           cleanup.register(seed);
         }
-
-        console.log(`[buildUnsignedMultisigSpendTx] Adding seed to spendBuilder...`);
         spendBuilder.seed(seed);
-        console.log(`[buildUnsignedMultisigSpendTx] Seed ${seedIdx} added`);
       }
     }
 
     // Use computeRefund to create refund seed (uses wrong lock root internally, but we'll fix it after building)
-    // NOTE: computeRefund uses LockRoot::Lock(spendCondition) which hashes via spendCondition.hash(),
-    // but wallets query notes by firstName(). We fix this in the protobuf after building.
-    console.log(`[buildUnsignedMultisigSpendTx] Computing refund...`);
     spendBuilder.computeRefund(false);
-    console.log(`[buildUnsignedMultisigSpendTx] Refund computed`);
 
     // Verify spend is balanced before adding to builder (like funding flow does)
-    console.log(`[buildUnsignedMultisigSpendTx] Checking if spend is balanced...`);
     if (!spendBuilder.isBalanced()) {
       throw new Error(`SpendBuilder ${i} is not balanced after computeRefund`);
     }
-    console.log(`[buildUnsignedMultisigSpendTx] Spend is balanced`);
 
     // Add spend to transaction builder
-    console.log(`[buildUnsignedMultisigSpendTx] Adding spend to builder...`);
     builder.spend(spendBuilder);
-    console.log(`[buildUnsignedMultisigSpendTx] Spend ${i} added to builder`);
   }
 
   // Calculate fee (same pattern as funding flow)
-  console.log(`[buildUnsignedMultisigSpendTx] Calculating fee...`);
   const exactFeeNicks = Number(builder.calcFee());
-  console.log(`[buildUnsignedMultisigSpendTx] Calculated fee: ${exactFeeNicks} nicks (${(exactFeeNicks / 65536).toFixed(4)} NOCK)`);
-  
-  // Log the state before setFeeAndBalanceRefund
-  const curFeeBeforeSet = Number(builder.curFee());
-  console.log(`[buildUnsignedMultisigSpendTx] Current fee before set: ${curFeeBeforeSet} nicks`);
-  console.log(`[buildUnsignedMultisigSpendTx] Input total: ${totalInputNicks} nicks, Output total: ${totalOutputNicks} nicks`);
   
   const availableForFeeAndChange = totalInputNicks - totalOutputNicks;
-  console.log(`[buildUnsignedMultisigSpendTx] Available for fee+change: ${availableForFeeAndChange} nicks (${(availableForFeeAndChange / 65536).toFixed(4)} NOCK)`);
   
-  // Verify we have enough for the exact fee before attempting to set it
   if (exactFeeNicks > availableForFeeAndChange) {
     const shortfall = exactFeeNicks - availableForFeeAndChange;
     throw new Error(
@@ -721,7 +691,6 @@ export async function buildUnsignedMultisigSpendTx(params: {
   }
   
   // Set fee and balance refunds (same pattern as funding flow)
-  console.log(`[buildUnsignedMultisigSpendTx] Setting fee and balancing refunds with fee=${exactFeeNicks}...`);
   try {
     builder.setFeeAndBalanceRefund(BigInt(exactFeeNicks), true, false);
   } catch (err: any) {
@@ -735,75 +704,43 @@ export async function buildUnsignedMultisigSpendTx(params: {
       `Available for fee+change: ${(availableForFeeAndChange / 65536).toFixed(4)} NOCK`
     );
   }
-  console.log(`[buildUnsignedMultisigSpendTx] Fee set and refunds balanced`);
   
   // Get the actual fee after balancing
   const actualFeeNicks = builder.curFee();
   const actualFeeNock = Number(actualFeeNicks) / 65536;
-  console.log(`[buildUnsignedMultisigSpendTx] Actual fee: ${actualFeeNock.toFixed(4)} NOCK (${actualFeeNicks} nicks)`);
 
   // Build the unsigned transaction
-  console.log(`[buildUnsignedMultisigSpendTx] Building transaction...`);
-  const nockchainTx = builder.build();
+  let nockchainTx;
+  try {
+    nockchainTx = builder.build();
+  } catch (err: any) {
+    const errorMsg = err?.message || err?.toString() || String(err);
+    console.error('Error building transaction:', errorMsg);
+    throw new Error(
+      `Failed to build transaction: ${errorMsg}. ` +
+      `This may indicate an issue with the transaction structure or insufficient funds.`
+    );
+  }
   if (cleanup) {
     cleanup.register(nockchainTx);
   }
-  console.log(`[buildUnsignedMultisigSpendTx] Transaction built`);
-  
-  // Log the seeds in the built transaction for verification
-  const builtRawTx = nockchainTx.toRawTx();
-  const builtProtobuf = builtRawTx.toProtobuf();
-  console.log(`[buildUnsignedMultisigSpendTx] Built transaction seeds:`);
-  if (builtProtobuf.spends) {
-    for (let spendIdx = 0; spendIdx < builtProtobuf.spends.length; spendIdx++) {
-      const spend = builtProtobuf.spends[spendIdx];
-      if (spend.spend?.spend_kind?.Witness?.seeds) {
-        const seeds = spend.spend.spend_kind.Witness.seeds;
-        for (let sIdx = 0; sIdx < seeds.length; sIdx++) {
-          const s = seeds[sIdx];
-          const lockRoot = s.lock_root?.value || s.lock_root;
-          const gift = s.gift?.value || s.gift;
-          console.log(`  Spend[${spendIdx}].Seed[${sIdx}]: lock_root=${lockRoot}, gift=${gift}`);
-        }
-      }
-    }
-  }
 
   const txId = nockchainTx.id.value;
-  console.log(`[buildUnsignedMultisigSpendTx] Transaction ID: ${txId.slice(0, 16)}...`);
   
-  console.log(`[buildUnsignedMultisigSpendTx] Converting to RawTx...`);
   const rawTx = nockchainTx.toRawTx();
   if (cleanup) {
     cleanup.register(rawTx);
   }
 
-  console.log(`[buildUnsignedMultisigSpendTx] Converting to protobuf...`);
   const rawTxProtobuf = rawTx.toProtobuf();
   
-  // NOTE: The refund seed uses spendCondition.hash() for lock root, not firstName().
-  // This means the change note won't be found by wallets querying firstName().
-  // However, the transaction is still valid - the network accepts hash() as valid lock root.
-  // A proper fix would require changes to the WASM bindings or iris-rs.
-  // For now, we log the discrepancy:
-  const discrepancyCondition = await buildMultisigSpendCondition(threshold, participants);
-  const hashLockRoot = discrepancyCondition.hash().value;
-  const firstNameLockRoot = discrepancyCondition.firstName().value;
-  console.log(`[buildUnsignedMultisigSpendTx] NOTE: Refund uses hash() lock root: ${hashLockRoot.slice(0, 16)}...`);
-  console.log(`[buildUnsignedMultisigSpendTx] NOTE: Wallet queries firstName(): ${firstNameLockRoot.slice(0, 16)}...`);
-  console.log(`[buildUnsignedMultisigSpendTx] NOTE: Change note may not appear in wallet UI until proper fix.`);
-  try { discrepancyCondition.free(); } catch (e) { /* ignore */ }
-  
-  console.log(`[buildUnsignedMultisigSpendTx] Getting allNotes...`);
+  // Get notes and spend conditions from builder
   const txNotes = builder.allNotes();
 
   // Convert notes and spend conditions to protobufs
-  console.log(`[buildUnsignedMultisigSpendTx] Converting ${txNotes.notes.length} notes to protobufs...`);
   const notesProtobufs = txNotes.notes.map((n: any) => n.toProtobuf());
-  console.log(`[buildUnsignedMultisigSpendTx] Converting ${txNotes.spendConditions.length} spendConditions to protobufs...`);
   const spendConditionsProtobufs = txNotes.spendConditions.map((sc: any) => sc.toProtobuf());
 
-  console.log(`[buildUnsignedMultisigSpendTx] Complete! Fee: ${actualFeeNock.toFixed(4)} NOCK`);
 
   return {
     txId,
@@ -875,8 +812,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     cleanup.register(coinbaseFirstNameDigest);
   }
   
-
-  // Query both types of notes in parallel (like the extension does)
+  // Query both types of notes in parallel 
   const grpcClient = await getGrpcClient(grpcEndpoint);
   let simpleBalance, coinbaseBalance;
   try {
@@ -905,17 +841,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     block_id: simpleBalance?.block_id || coinbaseBalance?.block_id,
   };
 
-  // Keep notes as JavaScript objects with protoNote (like extension does)
-  // Convert to WASM Note objects only when actually building the transaction
-  // This avoids WASM object lifecycle issues
-  interface NoteWithProto {
-    protoNote: any;
-    assets: number;
-    originPage: number;
-    nameFirst: string;
-    nameLast?: string;
-  }
-  
+  // Keep notes as JavaScript objects with protoNote 
   const notesWithProto: NoteWithProto[] = balance.notes.map((entry: any) => {
     if (!entry.note) {
       throw new Error('Balance entry missing note protobuf');
@@ -944,7 +870,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     };
   });
   
-  // Calculate total available from JavaScript objects (no WASM needed)
+  // Calculate total available from JavaScript objects 
   const totalAvailable = notesWithProto.reduce((sum, n) => sum + n.assets, 0);
   console.log(`Found ${notesWithProto.length} notes, total: ${(totalAvailable / 65536).toFixed(4)} NOCK`);
   
@@ -956,11 +882,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     );
   }
   
-  // Step 3: Select notes needed to cover amount + conservative fee estimate
-  // Fee is deterministic: fee = word_count × 32,768 nicks
-  // Conservative estimate: assume ~10 words per input (signature + merkle proof + note data)
-  // For 1-2 inputs: ~0.1 NOCK fee, for more inputs: ~0.05 NOCK per input
-  // Add 20% buffer to be safe
+  // Select notes needed to cover amount + conservative fee estimate
   const conservativeFeeEstimateNicks = Math.max(
     Math.ceil(amountNicks * 0.2), // 20% of amount
     65536 // Minimum 1 NOCK fee estimate
@@ -968,11 +890,9 @@ export async function buildUnsignedMultisigFundingTx(params: {
   const targetWithFee = amountNicks + conservativeFeeEstimateNicks;
   
   // Uses greedy algorithm: largest notes first until we have enough
-  // Select from JavaScript note objects (no WASM yet)
   let selectedNotes = selectNotesForAmount(notesWithProto, targetWithFee);
   if (!selectedNotes) {
     // Fallback: if conservative estimate fails, try selecting based on amount only
-    // (this handles edge cases where fee estimate was too high)
     if (totalAvailable >= amountNicks) {
       // Select notes based on amount only, we'll verify exact fee after building
       selectedNotes = selectNotesForAmount(notesWithProto, amountNicks);
@@ -984,24 +904,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     }
   }
 
-  // Step 4: Build user's spend condition for inputs (already created above for first-name derivation)
-  // userSpendCondition is already available from above
-
-  // Step 5: Convert selected notes to WASM Note objects (like extension does)
-  // Convert only when needed, right before building the transaction
-  // Step 5: Convert selected notes to WASM Note objects
-  const wasmNotes = selectedNotes.map((note) => {
-    if (!note.protoNote) {
-      throw new Error('Note missing protoNote - cannot build transaction');
-    }
-    const wasmNote = wasm.Note.fromProtobuf(note.protoNote);
-    if (cleanup) {
-      cleanup.register(wasmNote);
-    }
-    return wasmNote;
-  });
-
-  // Step 6: Build transaction using SpendBuilder
+  // Build transaction using SpendBuilder
   const feePerWord = BigInt(32768); // 0.5 NOCK per word
   const builder = new wasm.TxBuilder(feePerWord);
   if (cleanup) {
@@ -1016,29 +919,20 @@ export async function buildUnsignedMultisigFundingTx(params: {
 
   const giftAmount = BigInt(amountNicks);
 
-  // Step 7: Create SpendBuilder for each input note
-  // Strategy: Add gift seed to first note, then let recalcAndSetFee handle refunds automatically
-  // 
-  // IMPORTANT: SpendBuilder takes ownership of the note, so we need to:
-  // 1. Get the hash BEFORE passing the note to SpendBuilder
-  // 2. Clone the note for SpendBuilder if we need to access it afterwards
-  
-  // For the first note, get parent hash BEFORE creating SpendBuilder
-  // (SpendBuilder consumes the note, so we need the hash beforehand)
-  let parentHash: wasm.Digest | null = null;
-  if (wasmNotes.length > 0 && giftAmount > 0n) {
+  // Get parent hash value for first note BEFORE creating SpendBuilder
+  let parentHashValue: string | null = null;
+  if (selectedNotes.length > 0 && giftAmount > 0n) {
     const firstNoteProto = selectedNotes[0].protoNote;
     
     // Create a temporary note just to get the hash
     const tempNote = wasm.Note.fromProtobuf(firstNoteProto);
     try {
-      parentHash = tempNote.hash();
-      if (!parentHash) {
+      const tempHash = tempNote.hash();
+      if (!tempHash) {
         throw new Error('Note.hash() returned null');
       }
-      if (cleanup) {
-        cleanup.register(parentHash);
-      }
+      parentHashValue = tempHash.value;
+      try { tempHash.free(); } catch (e) { /* ignore */ }
     } catch (err: any) {
       const errorMsg = err?.message || err?.toString() || String(err);
       throw new Error(`Failed to get hash for first note: ${errorMsg}`);
@@ -1047,28 +941,27 @@ export async function buildUnsignedMultisigFundingTx(params: {
     }
   }
   
-  for (let i = 0; i < wasmNotes.length; i++) {
-    const note = wasmNotes[i];
+  // Process each selected note
+  for (let i = 0; i < selectedNotes.length; i++) {
     const noteInfo = selectedNotes[i];
     
-    // Validate note is not null/undefined
-    if (!note) {
-      throw new Error(`Invalid note at index ${i}: note is null or undefined`);
+    // Create FRESH WASM Note from protobuf for SpendBuilder
+    const note = wasm.Note.fromProtobuf(noteInfo.protoNote);
+    if (cleanup) {
+      cleanup.register(note);
     }
     
     // Discover the correct spend condition for this note by matching its nameFirst (lock root)
-    // This is critical: the spend condition must match how the note was originally locked
     const inputSpendCondition = await discoverSpendConditionForNote(
       trimmedPkh,
       { nameFirst: noteInfo.nameFirst, originPage: noteInfo.originPage },
       cleanup
     );
     
-    // Refund goes back to user with simple PKH (no timelock needed for change)
+    // Refund goes back to user with simple PKH
     const refundSpendCondition = await buildSimplePkhSpendCondition(trimmedPkh, cleanup);
     
     // Create SpendBuilder with discovered spend condition for input
-    // Note: SpendBuilder takes ownership of note, spend_condition, and refund_lock
     const spendBuilder = new wasm.SpendBuilder(
       note,
       inputSpendCondition,
@@ -1079,13 +972,24 @@ export async function buildUnsignedMultisigFundingTx(params: {
     }
 
     // Add seed for multisig output (only on first spend to avoid duplicates)
-    if (i === 0 && giftAmount > 0n && parentHash) {
+    if (i === 0 && giftAmount > 0n && parentHashValue) {
+      // Create FRESH Digest for parentHash - Seed consumes its parentHash argument
+      const parentHashDigest = new wasm.Digest(parentHashValue);
+      if (cleanup) {
+        cleanup.register(parentHashDigest);
+      }
+      
+      const noteData = wasm.NoteData.empty();
+      if (cleanup) {
+        cleanup.register(noteData);
+      }
+      
       const multisigSeed = new wasm.Seed(
         null, // output_source
         multisigLockRoot, // lock_root - this creates the note with multisig spend condition
         giftAmount, // gift amount
-        wasm.NoteData.empty(), // note_data
-        parentHash // parent_hash (already computed before the loop)
+        noteData, // note_data
+        parentHashDigest // parent_hash (fresh digest for each seed)
       );
       if (cleanup) {
         cleanup.register(multisigSeed);
@@ -1105,7 +1009,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     builder.spend(spendBuilder);
   }
 
-  // Step 8: Calculate exact fee (deterministic: fee = word_count × 32,768 nicks)
+  // Calculate exact fee (deterministic: fee = word_count × 32,768 nicks)
   const exactFeeNicks = Number(builder.calcFee());
   const totalNeeded = amountNicks + exactFeeNicks;
   const totalSelected = selectedNotes.reduce((sum: number, n) => sum + n.assets, 0);
@@ -1144,7 +1048,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
     throw new Error(`Failed to set transaction fee: ${errorMsg}`);
   }
 
-  // Step 10: Build the unsigned transaction
+  // Build the unsigned transaction
   let nockchainTx;
   try {
     nockchainTx = builder.build();
@@ -1160,30 +1064,32 @@ export async function buildUnsignedMultisigFundingTx(params: {
     cleanup.register(nockchainTx);
   }
 
+  const txId = nockchainTx.id.value;
+  
   const rawTx = nockchainTx.toRawTx();
   if (cleanup) {
     cleanup.register(rawTx);
   }
 
-  // Get notes and spend conditions from builder (as Iris example does)
-  // This ensures they match exactly what's in the transaction
+  const rawTxProtobuf = rawTx.toProtobuf();
+  
+  // Get notes and spend conditions from builder
   const txNotes = builder.allNotes();
+
+  // Convert notes and spend conditions to protobufs
   const notesProtobufs = txNotes.notes.map((n: any) => n.toProtobuf());
   const spendConditionsProtobufs = txNotes.spendConditions.map((sc: any) => sc.toProtobuf());
 
-  const txId = nockchainTx.id.value;
-  const rawTxProtobuf = rawTx.toProtobuf();
-  
-  // Get actual fee from builder
-  const actualFeeNicks = Number(builder.curFee());
-  const actualFeeNock = actualFeeNicks / 65536;
+  // Get the actual fee after balancing
+  const actualFeeNicks = builder.curFee();
+  const actualFeeNock = Number(actualFeeNicks) / 65536;
 
   return {
     txId,
     rawTxProtobuf,
     notesProtobufs,
     spendConditionsProtobufs,
-    actualFeeNicks,
+    actualFeeNicks: Number(actualFeeNicks),
     actualFeeNock,
   };
 }
