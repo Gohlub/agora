@@ -260,8 +260,9 @@ export default function TransactionProposal({
           throw new Error(`Transaction validation failed: ${validation.error}`);
         }
 
-        // The wallet extension returns a transaction with the signed ID
+        // Use the recalculated transaction ID from validation (this is correct)
         const actualTxId = validation.signedTxId || txId;
+        console.log('[DirectSpend] Using transaction ID:', actualTxId);
 
         setTxStatus('Broadcasting transaction...');
         const grpcClient = await getGrpcClient(grpcEndpoint);
@@ -300,9 +301,26 @@ export default function TransactionProposal({
         // Proposal flow: create proposal with signature for m-of-n
         const proposerSignedTxJson = JSON.stringify(signedTxProtobuf);
 
+        // Validate and get the correct signed transaction ID
+        setTxStatus('Validating proposal...');
+        const validation = await validateSignedTransaction({
+          signedTxProtobuf,
+          notesProtobufs,
+          spendConditionsProtobufs,
+          cleanup: wasmCleanup,
+        });
+        
+        if (!validation.valid) {
+          throw new Error(`Proposal validation failed: ${validation.error}`);
+        }
+
+        // Use the recalculated transaction ID for the proposal
+        const correctTxId = validation.signedTxId || txId;
+        console.log('[Proposal] Using correct transaction ID:', correctTxId);
+
         setTxStatus('Submitting proposal...');
         const proposal = await apiClient.createProposal({
-          tx_id: txId,
+          tx_id: correctTxId,
           lock_root_hash: lockRootHash,
           proposer_pkh: pkh,
           threshold,
