@@ -264,58 +264,7 @@ export async function discoverSpendConditionForNote(
 // Transaction Building Utilities
 // ============================================================
 
-/**
- * Create WASM notes from a balance query result.
- */
-export async function createWasmNotesFromBalance(
-  balance: any,
-  cleanup?: WasmResourceManager
-): Promise<wasm.Note[]> {
-  await ensureWasmInitialized();
-  
-  if (!balance?.notes || balance.notes.length === 0) {
-    throw new Error('No notes found in balance');
-  }
-  
-  const wasmNotes = balance.notes.map((entry: any, index: number) => {
-    
-    if (!entry.note) {
-      throw new Error(`Balance entry at index ${index} missing note protobuf`);
-    }
-    
-    // Use entry.note directly (this is the protobuf, same as note.protoNote in extension)
-    const protoNote = entry.note;
-    
-    let note;
-    try {
-      note = wasm.Note.fromProtobuf(protoNote);
-      if (!note) {
-        throw new Error('Note.fromProtobuf returned null');
-      }
-      
-      // Immediately validate the note is usable
-      try {
-        const testAssets = note.assets;
-        if (testAssets === null || testAssets === undefined) {
-          throw new Error('Note.assets is null/undefined after creation');
-        }
-      } catch (err: any) {
-        const errorMsg = err?.message || err?.toString() || String(err);
-        throw new Error(`Note created but not usable: ${errorMsg}`);
-      }
-    } catch (err: any) {
-      const errorMsg = err?.message || err?.toString() || String(err);
-      throw new Error(`Failed to create note from protobuf at index ${index}: ${errorMsg}`);
-    }
-    
-    if (cleanup) {
-      cleanup.register(note);
-    }
-    return note;
-  });
-  
-  return wasmNotes;
-}
+
 
 /**
  * Greedy coin selection algorithm for notes with assets.
@@ -653,8 +602,6 @@ export async function buildUnsignedMultisigSpendTx(params: {
           parentHashDigest // Fresh digest for each seed (WASM object is consumed)
         );
         
-        // Verify the seed has the correct lock root
-        
         if (cleanup) {
           cleanup.register(seed);
         }
@@ -834,15 +781,8 @@ export async function buildUnsignedMultisigFundingTx(params: {
     throw new Error('No notes found in your wallet. Please fund your personal wallet first.');
   }
   
-  // Create a combined balance structure for createWasmNotesFromBalance
-  const balance = {
-    notes: allNotes,
-    height: simpleBalance?.height || coinbaseBalance?.height,
-    block_id: simpleBalance?.block_id || coinbaseBalance?.block_id,
-  };
-
   // Keep notes as JavaScript objects with protoNote 
-  const notesWithProto: NoteWithProto[] = balance.notes.map((entry: any) => {
+  const notesWithProto: NoteWithProto[] = allNotes.map((entry: any) => {
     if (!entry.note) {
       throw new Error('Balance entry missing note protobuf');
     }
@@ -872,7 +812,6 @@ export async function buildUnsignedMultisigFundingTx(params: {
   
   // Calculate total available from JavaScript objects 
   const totalAvailable = notesWithProto.reduce((sum, n) => sum + n.assets, 0);
-  console.log(`Found ${notesWithProto.length} notes, total: ${(totalAvailable / 65536).toFixed(4)} NOCK`);
   
   // Check if we have enough balance at all (just for amount, fee will be calculated exactly later)
   if (totalAvailable < amountNicks) {
@@ -1014,8 +953,6 @@ export async function buildUnsignedMultisigFundingTx(params: {
   const totalNeeded = amountNicks + exactFeeNicks;
   const totalSelected = selectedNotes.reduce((sum: number, n) => sum + n.assets, 0);
   
-  // Log fee calculation for debugging (can be removed in production)
-  console.log('Transaction fee:', `${(exactFeeNicks / 65536).toFixed(4)} NOCK`);
   // Verify we have enough funds with the exact fee
   // If insufficient, we need more notes (but that would require rebuilding, so we fail here)
   if (totalSelected < totalNeeded) {
