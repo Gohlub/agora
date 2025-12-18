@@ -13,7 +13,9 @@ Multisig wallet for Nockchain.
 
 ### 1. Build WASM Component
 
-The client requires the forked iris-wasm module from [Gohlub/iris-rs](https://github.com/Gohlub/iris-rs). Run the build script to clone, build, and copy the WASM files:
+The client requires a forked iris-wasm module from [Gohlub/iris-rs](https://github.com/Gohlub/iris-rs).
+
+Run the build script to clone, build, and copy the WASM module:
 
 ```bash
 chmod +x scripts/build-wasm.sh
@@ -38,6 +40,8 @@ API_PORT=3000
 CORS_ORIGIN=http://localhost:5173
 ```
 ### 2. Start the API Server
+
+**Note:** Environment variables are configured in `docker-compose.yml` by default. To customize them, create a `.env` file in the `server/` directory or modify `docker-compose.yml`.
 
 ```bash
 cd server

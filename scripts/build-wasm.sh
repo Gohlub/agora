@@ -47,6 +47,14 @@ cp pkg/iris_wasm.js "$CLIENT_WASM_DIR/"
 cp pkg/iris_wasm_bg.wasm "$CLIENT_WASM_DIR/"
 cp pkg/iris_wasm_bg.wasm.d.ts "$CLIENT_WASM_DIR/"
 
+# Create index.ts for consistent imports
+echo "📝 Creating index.ts for WASM imports..."
+cat > "$CLIENT_WASM_DIR/index.ts" << 'EOF'
+// Re-export WASM module for consistent imports
+export * from './iris_wasm';
+export { default } from './iris_wasm';
+EOF
+
 # Clean up
 echo "🧹 Cleaning up temporary files..."
 cd "$AGORA_DIR"
@@ -60,3 +68,4 @@ echo "   - iris_wasm.js"
 echo "   - iris_wasm.d.ts"
 echo "   - iris_wasm_bg.wasm"
 echo "   - iris_wasm_bg.wasm.d.ts"
+echo "   - index.ts (created)"
