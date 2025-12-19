@@ -149,12 +149,17 @@ class ApiClient {
 
   async markProposalBroadcast(id: string, broadcasterPkh: string, finalTxId?: string): Promise<any> {
     try {
-      const response = await this.client.post(`/api/proposals/${id}/broadcast`, {
-        broadcaster_pkh: broadcasterPkh,
+      const payload = {
+        _broadcaster_pkh: broadcasterPkh, // Note: server expects underscore prefix
         final_tx_id: finalTxId,
-      });
+      };
+      const response = await this.client.post(`/api/proposals/${id}/broadcast`, payload);
       return response.data;
     } catch (error) {
+      const axiosError = error as any;
+      if (axiosError.response?.data) {
+        console.error('markProposalBroadcast error response:', axiosError.response.data);
+      }
       this.handleError(error);
     }
   }
