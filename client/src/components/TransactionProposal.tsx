@@ -228,6 +228,10 @@ export default function TransactionProposal({
       setTxStatus('Connecting to Iris wallet...');
       const provider = await getConnectedProvider();
       
+      if (!provider) {
+        throw new Error('Failed to get wallet provider');
+      }
+      
       setTxStatus('Requesting signature... (check Iris wallet popup)');
       const signedTxProtobuf = await provider.signRawTx({
         rawTx: rawTxProtobuf,
@@ -301,26 +305,9 @@ export default function TransactionProposal({
         // Proposal flow: create proposal with signature for m-of-n
         const proposerSignedTxJson = JSON.stringify(signedTxProtobuf);
 
-        // Validate and get the correct signed transaction ID
-        setTxStatus('Validating proposal...');
-        const validation = await validateSignedTransaction({
-          signedTxProtobuf,
-          notesProtobufs,
-          spendConditionsProtobufs,
-          cleanup: wasmCleanup,
-        });
-        
-        if (!validation.valid) {
-          throw new Error(`Proposal validation failed: ${validation.error}`);
-        }
-
-        // Use the recalculated transaction ID for the proposal
-        const correctTxId = validation.signedTxId || txId;
-        console.log('[Proposal] Using correct transaction ID:', correctTxId);
-
         setTxStatus('Submitting proposal...');
         const proposal = await apiClient.createProposal({
-          tx_id: correctTxId,
+          tx_id: txId,
           lock_root_hash: lockRootHash,
           proposer_pkh: pkh,
           threshold,
@@ -345,7 +332,9 @@ export default function TransactionProposal({
     } catch (err: any) {
       // Reset provider on failure so next attempt starts fresh
       providerRef.current = null;
-      setError(err.message || 'Failed to create proposal');
+      const errorMsg = err?.message || err?.toString() || String(err);
+      console.error('[TransactionProposal] Error in handleBuildTransaction:', errorMsg, err);
+      setError(errorMsg);
       setTxStatus(null);
     } finally {
       setBuilding(false);
