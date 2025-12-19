@@ -23,8 +23,7 @@ export default function Home() {
           To begin using Agora, you need to connect your Iris wallet extension.
         </p>
         <ol style={{ marginLeft: '1.5rem', color: '#666', lineHeight: '1.8' }}>
-          <li style={{ marginBottom: '0.5rem' }}>Make sure you have the Iris wallet extension installed in your browser</li>
-          <li style={{ marginBottom: '0.5rem' }}>Click the "Connect Wallet" button in the top right corner</li>
+          <li style={{ marginBottom: '0.5rem' }}>Click the 'Iris Connect' button in the top right corner</li>
           <li style={{ marginBottom: '0.5rem' }}>Approve the connection request in your wallet extension</li>
           <li>Once connected, you can create and manage multisig wallets</li>
         </ol>
