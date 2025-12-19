@@ -202,36 +202,38 @@ export default function PendingProposals() {
       
       setStatusMessage('Aggregating signatures...');
       
-      // Get all signed tx protobufs from the collected signatures
-      // IMPORTANT: Different wallet extensions compute different IDs after signing.
-      // We normalize all IDs to match the FIRST signer's ID, since that transaction
-      // has a valid signature for its computed ID.
+      // Get the original unsigned transaction (all signers signed this same base)
+      const unsignedTxProtobuf = JSON.parse(proposal.raw_tx_json);
+      const unsignedTxId = unsignedTxProtobuf.id?.value || unsignedTxProtobuf.id;
+      
+      // Build transactions for merging: same base structure, different witnesses
       const signedTxProtobufs: any[] = [];
-      let baseId: string | null = null;
       
       for (const sig of proposal.signatures) {
-        const parsed = JSON.parse(sig.signed_tx_json);
-        const parsedId = parsed.id?.value || parsed.id;
+        const signedTx = JSON.parse(sig.signed_tx_json);
         
-        if (baseId === null) {
-          // First signer - use their ID as the base
-          baseId = parsedId;
-        } else if (parsedId !== baseId) {
-          // Subsequent signers - normalize to base ID
-          if (parsed.id?.value) {
-            parsed.id.value = baseId;
-          } else {
-            parsed.id = baseId;
-          }
+        // Create a transaction with the unsigned base structure but this signer's witness
+        const txForMerge = JSON.parse(JSON.stringify(unsignedTxProtobuf)); // Deep copy
+        
+        // Copy the witness (spends with signatures) from the signed transaction
+        // The spends array contains the witness data with signatures
+        if (signedTx.spends && Array.isArray(signedTx.spends)) {
+          txForMerge.spends = signedTx.spends;
         }
         
-        signedTxProtobufs.push(parsed);
+        // Ensure ID matches unsigned transaction (mergeSignatures will recalc after merging)
+        if (txForMerge.id?.value !== undefined) {
+          txForMerge.id.value = unsignedTxId;
+        } else {
+          txForMerge.id = unsignedTxId;
+        }
+        
+        signedTxProtobufs.push(txForMerge);
       }
             
-      // For m-of-n multisig, we need to merge signatures from all signers.
-      // Each signed tx contains one signer's signature in the witness.
-      // Use mergeSignatures to combine signatures into one tx.
-      // We pass the threshold to only include the minimum required signatures (minimizes fees).
+      // For m-of-n multisig, merge signatures from all signers.
+      // Each tx has the same base structure (same ID) but different witnesses (signatures).
+      // mergeSignatures will combine the witnesses and recalculate the final ID.
       let mergedRawTx;
       try {
         mergedRawTx = wasmCleanup.register(
@@ -241,13 +243,28 @@ export default function PendingProposals() {
         throw new Error(`Failed to merge signatures: ${mergeErr?.message || mergeErr}`);
       }
       
-      // The mergeSignatures function now correctly recalculates the transaction ID
-      const correctTxId = mergedRawTx.id.value;
-      
+      // The mergeSignatures function calculates the transaction ID, but let's verify it with recalcId
+      let finalTxId: string;
+      try {
+        const recalcId = mergedRawTx.recalcId();
+        if (recalcId && recalcId.value) {
+          finalTxId = recalcId.value;
+          console.log('[Broadcast] Using recalcId() result:', finalTxId);
+        } else {
+          // Fallback to merged transaction ID
+          finalTxId = mergedRawTx.id.value;
+          console.log('[Broadcast] recalcId() returned null, using merged ID:', finalTxId);
+        }
+      } catch (recalcErr: any) {
+        // If recalcId fails, use the ID from mergeSignatures (it should be correct)
+        finalTxId = mergedRawTx.id.value;
+        console.warn('[Broadcast] recalcId() failed, using merged ID:', finalTxId, 'Error:', recalcErr?.message);
+      }
+       
       // Get the protobuf for broadcasting
       const finalSignedTx = mergedRawTx.toProtobuf();
       
-      // Validate the merged transaction before broadcasting
+      // Validate the merged transaction before broadcasting (checks fee, balance, unlocks)
       setStatusMessage('Validating merged transaction...');
       const notesProtobufs = JSON.parse(proposal.notes_json);
       const spendConditionsProtobufs = JSON.parse(proposal.spend_conditions_json);
@@ -257,13 +274,14 @@ export default function PendingProposals() {
         notesProtobufs,
         spendConditionsProtobufs,
         cleanup: wasmCleanup,
+        expectedTxId: finalTxId, // Use the ID we already calculated from merged transaction
       });
       
       if (!validation.valid) {
         console.error('[Broadcast] Validation failed:', validation.error);
         throw new Error(`Transaction validation failed: ${validation.error}`);
       }
-      
+            
       // Send the transaction
       setStatusMessage('Broadcasting transaction...');
       const grpcClient = await getGrpcClient(grpcEndpoint);
@@ -274,11 +292,11 @@ export default function PendingProposals() {
         throw new Error(`Failed to send transaction: ${sendErr?.message || sendErr}`);
       }
       
-      // Check acceptance using the recalculated ID (this is the correct one)
+      // Check acceptance using the validated ID (this is the correct one)
       setStatusMessage('Checking acceptance...');
       
       try {
-        await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), correctTxId, {
+        await checkTransactionAcceptance(() => getGrpcClient(grpcEndpoint), finalTxId, {
           intervalMs: ACCEPTANCE_CHECK_INTERVAL_MS,
           maxAttempts: 10, // Increased attempts since this should be the correct ID
         });
@@ -287,10 +305,10 @@ export default function PendingProposals() {
         // Don't fail the broadcast - the transaction was sent successfully
       }
       
-      // Always store and display the recalculated ID - this is the correct one
-      await apiClient.markProposalBroadcast(proposalId, pkh, correctTxId);
+      // Store the final validated transaction ID in the backend
+      await apiClient.markProposalBroadcast(proposalId, pkh, finalTxId);
       
-      setStatusMessage(`Transaction broadcast! ID: ${correctTxId.substring(0, 16)}...`);
+      setStatusMessage(`Transaction broadcast! ID: ${finalTxId.substring(0, 16)}...`);
       
       // Refresh proposals
       await loadProposals();
