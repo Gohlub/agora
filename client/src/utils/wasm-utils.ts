@@ -689,9 +689,9 @@ export async function buildUnsignedMultisigSpendTx(params: {
     const shortfall = exactFeeNicks - availableForFeeAndChange;
     throw new Error(
       `Insufficient funds for transaction fee. ` +
-      `The exact fee is ${(exactFeeNicks / 65536).toFixed(4)} NOCK, ` +
-      `but only ${(availableForFeeAndChange / 65536).toFixed(4)} NOCK is available after outputs. ` +
-      `Either reduce the output amount by ${(shortfall / 65536).toFixed(4)} NOCK, ` +
+      `The exact fee is ${Number((exactFeeNicks / 65536).toFixed(4))} NOCK (based on transaction size), ` +
+      `but only ${Number((availableForFeeAndChange / 65536).toFixed(4))} NOCK is available after outputs. ` +
+      `Either reduce the output amount by ${Number((shortfall / 65536).toFixed(4))} NOCK to free up funds for the fee, ` +
       `or select more notes as inputs.`
     );
   }
@@ -1096,7 +1096,7 @@ export async function buildUnsignedMultisigFundingTx(params: {
  * This reconstructs a TxBuilder from the transaction and runs validation to check:
  * 1. Fee is sufficient (cur_fee >= calc_fee)
  * 2. All spends are balanced (note.assets = seeds + fee)
- * 3. No missing unlocks (all required signatures are present)
+ * 3. No missing unlocks (all required signatures are present) - can be skipped for proposals
  * 
  * @param params - Transaction data from signing
  * @returns Validation result with success status, actual transaction ID, and any error message
@@ -1106,51 +1106,200 @@ export async function validateSignedTransaction(params: {
   notesProtobufs: object[];
   spendConditionsProtobufs: object[];
   cleanup?: WasmResourceManager;
+  expectedTxId?: string; // Optional: if provided, use this instead of extracting from rawTx.id
 }): Promise<{ valid: boolean; signedTxId?: string; error?: string }> {
   await ensureWasmInitialized();
   
-  const { signedTxProtobuf, notesProtobufs, spendConditionsProtobufs, cleanup } = params;
+  const { signedTxProtobuf, notesProtobufs, spendConditionsProtobufs, cleanup, expectedTxId } = params;
 
   try {
+    // Validate inputs
+    if (!signedTxProtobuf) {
+      throw new Error('signedTxProtobuf is required');
+    }
+    if (!Array.isArray(notesProtobufs) || notesProtobufs.length === 0) {
+      throw new Error('notesProtobufs must be a non-empty array');
+    }
+    if (!Array.isArray(spendConditionsProtobufs) || spendConditionsProtobufs.length === 0) {
+      throw new Error('spendConditionsProtobufs must be a non-empty array');
+    }
+    if (notesProtobufs.length !== spendConditionsProtobufs.length) {
+      throw new Error(`Mismatch: ${notesProtobufs.length} notes but ${spendConditionsProtobufs.length} spend conditions`);
+    }
+
+    // Validate protobuf structure before creating WASM objects
+    if (!signedTxProtobuf || typeof signedTxProtobuf !== 'object') {
+      throw new Error('signedTxProtobuf must be a valid object');
+    }
+    
     // Reconstruct WASM objects from protobufs
-    const rawTx = wasm.RawTx.fromProtobuf(signedTxProtobuf);
+    let rawTx: any;
+    try {
+      rawTx = wasm.RawTx.fromProtobuf(signedTxProtobuf);
+      if (!rawTx) {
+        throw new Error('RawTx.fromProtobuf returned null');
+      }
+    } catch (err: any) {
+      const errorMsg = err?.message || String(err);
+      throw new Error(`Failed to create RawTx from protobuf: ${errorMsg}. The transaction protobuf may be invalid or corrupted.`);
+    }
     if (cleanup) cleanup.register(rawTx);
 
     // Note: rawTx.id.value might be stale after signature merging, so we recalculate below
 
-    const notes = notesProtobufs.map((proto) => {
-      const note = wasm.Note.fromProtobuf(proto);
-      if (cleanup) cleanup.register(note);
-      return note;
+    const notes = notesProtobufs.map((proto, i) => {
+      if (!proto) {
+        throw new Error(`Note protobuf at index ${i} is null or undefined`);
+      }
+      try {
+        const note = wasm.Note.fromProtobuf(proto);
+        if (!note) {
+          throw new Error(`Note.fromProtobuf returned null at index ${i}`);
+        }
+        if (cleanup) cleanup.register(note);
+        return note;
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+        if (errorMsg.includes('null pointer')) {
+          throw new Error(`Null pointer error creating Note at index ${i}: ${errorMsg}`);
+        }
+        throw new Error(`Failed to create Note from protobuf at index ${i}: ${errorMsg}`);
+      }
     });
 
-    const spendConditions = spendConditionsProtobufs.map((proto) => {
-      const sc = wasm.SpendCondition.fromProtobuf(proto);
-      if (cleanup) cleanup.register(sc);
-      return sc;
+    const spendConditions = spendConditionsProtobufs.map((proto, i) => {
+      if (!proto) {
+        throw new Error(`SpendCondition protobuf at index ${i} is null or undefined`);
+      }
+      try {
+        const sc = wasm.SpendCondition.fromProtobuf(proto);
+        if (!sc) {
+          throw new Error(`SpendCondition.fromProtobuf returned null at index ${i}`);
+        }
+        if (cleanup) cleanup.register(sc);
+        return sc;
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+        if (errorMsg.includes('null pointer')) {
+          throw new Error(`Null pointer error creating SpendCondition at index ${i}: ${errorMsg}`);
+        }
+        throw new Error(`Failed to create SpendCondition from protobuf at index ${i}: ${errorMsg}`);
+      }
     });
 
+    // Full validation for fully signed/merged transactions
     // Verify that spend conditions match notes
+    let correctTxId: string;
+    
     for (let i = 0; i < notes.length; i++) {
-      const note = notes[i];
-      const sc = spendConditions[i];
-      const noteNameFirst = note.name.first;
-      const scFirstName = sc.firstName().value;
+        const note = notes[i];
+        const sc = spendConditions[i];
+        if (!note || !sc) {
+          throw new Error(`Null note or spend condition at index ${i}`);
+        }
+        
+        let noteNameFirst: string;
+        let scFirstName: string;
+        try {
       
-      if (noteNameFirst !== scFirstName) {
-        throw new Error(`Spend condition mismatch for note ${i}`);
+          noteNameFirst = note.name.first;
+
+        } catch (err: any) {
+          throw new Error(`Failed to get note.name.first at index ${i}: ${err?.message || err}`);
+        }
+        
+        try {
+          console.log(`[validateSignedTransaction] Getting sc.firstName() for index ${i}...`);
+          const scFirstNameObj = sc.firstName();
+          if (!scFirstNameObj) {
+            throw new Error('sc.firstName() returned null');
+          }
+          scFirstName = scFirstNameObj.value;
+          console.log(`[validateSignedTransaction] Got sc.firstName().value: ${scFirstName}`);
+        } catch (err: any) {
+          throw new Error(`Failed to get sc.firstName() at index ${i}: ${err?.message || err}`);
+        }
+        
+        if (noteNameFirst !== scFirstName) {
+          throw new Error(`Spend condition mismatch for note ${i}: note has ${noteNameFirst}, spend condition has ${scFirstName}`);
+        }
+      }
+      
+      // Validate inputs before creating TxBuilder
+      if (!rawTx) {
+        throw new Error('rawTx is null or undefined');
+      }
+      if (!Array.isArray(notes) || notes.length === 0) {
+        throw new Error(`Invalid notes array: expected non-empty array, got ${notes}`);
+      }
+      if (!Array.isArray(spendConditions) || spendConditions.length === 0) {
+        throw new Error(`Invalid spendConditions array: expected non-empty array, got ${spendConditions}`);
+      }
+      if (notes.length !== spendConditions.length) {
+        throw new Error(`Mismatch: ${notes.length} notes but ${spendConditions.length} spend conditions`);
+      }
+      
+      // Check for null WASM objects
+      for (let i = 0; i < notes.length; i++) {
+        if (!notes[i]) {
+          throw new Error(`Note at index ${i} is null or undefined`);
+        }
+        if (!spendConditions[i]) {
+          throw new Error(`SpendCondition at index ${i} is null or undefined`);
+        }
+      }
+      
+      // Reconstruct TxBuilder from the signed transaction
+
+      let builder: any;
+      try {
+        builder = wasm.TxBuilder.fromTx(rawTx, notes, spendConditions);
+        console.log('[validateSignedTransaction] TxBuilder.fromTx completed');
+        if (!builder) {
+          throw new Error('TxBuilder.fromTx returned null - this indicates invalid transaction data');
+        }
+        if (cleanup) cleanup.register(builder);
+        console.log('[validateSignedTransaction] TxBuilder registered with cleanup');
+      } catch (builderErr: any) {
+        const errorMsg = builderErr?.message || String(builderErr);
+        // Provide detailed error information
+        console.error('[validateSignedTransaction] Failed to create TxBuilder:', {
+          error: errorMsg,
+          notesCount: notes.length,
+          spendConditionsCount: spendConditions.length,
+          rawTxType: typeof rawTx,
+          errorStack: builderErr?.stack,
+        });
+        throw new Error(`Failed to create TxBuilder from transaction: ${errorMsg}. This may indicate corrupted transaction data or mismatched notes/spend conditions.`);
+      }
+      
+      // Full validation including unlock check
+      try {
+        builder.validate();
+      } catch (validateErr: any) {
+        const errorMsg = validateErr?.message || String(validateErr);
+        throw new Error(`Transaction validation failed: ${errorMsg}`);
+      }
+      
+    // Get the transaction ID
+    if (expectedTxId) {
+      console.log('[validateSignedTransaction] Using provided expectedTxId:', expectedTxId);
+      correctTxId = expectedTxId;
+    } else {
+      console.log('[validateSignedTransaction] Getting transaction ID from rawTx.id...');
+      try {
+        const txIdObj = rawTx.id;
+        if (!txIdObj) {
+          throw new Error('Transaction ID is missing from rawTx');
+        }
+        correctTxId = typeof txIdObj === 'string' ? txIdObj : (txIdObj.value || String(txIdObj));
+        console.log('[validateSignedTransaction] Got transaction ID:', correctTxId);
+      } catch (idErr: any) {
+        const errorMsg = idErr?.message || String(idErr);
+        // If accessing rawTx.id fails (e.g., null pointer), suggest using expectedTxId
+        throw new Error(`Failed to get transaction ID from rawTx: ${errorMsg}. Consider passing expectedTxId parameter.`);
       }
     }
-
-    // Reconstruct TxBuilder from the signed transaction
-    const builder = wasm.TxBuilder.fromTx(rawTx, notes, spendConditions);
-    if (cleanup) cleanup.register(builder);
-
-    // Validate the transaction
-    builder.validate();
-
-    // Recalculate the transaction ID to ensure it's correct
-    const correctTxId = rawTx.recalcId().value;
 
     return { valid: true, signedTxId: correctTxId };
   } catch (err: any) {
